@@ -1,0 +1,19 @@
+{
+  "name": "orthoapp",
+  "productName": "OrthoApp",
+  "version": "0.16.1",
+  "description": "Offline orthopedic patient records, scoring, labs and radiology measurements",
+  "author": "Bassem Ehab <orthoapp26@gmail.com>",
+  "main": "main.js",
+  "scripts": { "start": "electron .", "dist": "electron-builder --win --x64 --publish never" },
+  "devDependencies": { "electron": "33.2.1", "electron-builder": "25.1.8" },
+  "build": {
+    "appId": "com.orthoapp.app",
+    "productName": "OrthoApp",
+    "files": ["main.js", "index.html", "package.json"],
+    "directories": { "buildResources": "build", "output": "dist" },
+    "win": { "target": ["nsis", "portable"], "icon": "build/icon.png" },
+    "nsis": { "oneClick": false, "allowToChangeInstallationDirectory": true, "perMachine": false },
+    "artifactName": "OrthoApp-${version}-${target}.${ext}"
+  }
+}
