@@ -60,6 +60,24 @@ ipcMain.handle('bridge:readImport', (e) => {
   if (!trusted(e)) throw new Error('not allowed');
   try { return fs.readFileSync(IMPORT_FILE(), 'utf8'); } catch (_) { return null; }
 });
+ipcMain.handle('bridge:readJson', (e, name) => {
+  if (!trusted(e)) throw new Error('not allowed');
+  if (!['request-images.json', 'suggestions.json'].includes(name)) throw new Error('bad name');
+  try { return fs.readFileSync(path.join(BRIDGE_DIR(), name), 'utf8'); } catch (_) { return null; }
+});
+ipcMain.handle('bridge:deleteJson', (e, name) => {
+  if (!trusted(e)) throw new Error('not allowed');
+  if (!['request-images.json', 'suggestions.json'].includes(name)) throw new Error('bad name');
+  try { fs.unlinkSync(path.join(BRIDGE_DIR(), name)); } catch (_) {}
+  return true;
+});
+ipcMain.handle('bridge:writeImage', (e, name, base64) => {
+  if (!trusted(e)) throw new Error('not allowed');
+  if (!/^[A-Za-z0-9_-]{1,40}\.(jpg|png)$/.test(name) || typeof base64 !== 'string' || base64.length > 60 * 1024 * 1024) throw new Error('bad image');
+  const dir = path.join(BRIDGE_DIR(), 'images'); fs.mkdirSync(dir, { recursive: true });
+  const tmp = path.join(dir, name + '.tmp'); fs.writeFileSync(tmp, Buffer.from(base64, 'base64')); fs.renameSync(tmp, path.join(dir, name));
+  return true;
+});
 ipcMain.handle('bridge:openFolder', (e) => {
   if (!trusted(e)) throw new Error('not allowed');
   fs.mkdirSync(BRIDGE_DIR(), { recursive: true });
