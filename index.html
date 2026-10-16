@@ -424,6 +424,7 @@ dialog.lab-viewer { max-width: 94vw; width: 640px; border: 1px solid var(--borde
           <h3>Backup &amp; restore</h3>
           <div id="backup-root"></div>
         </div>
+        <div class="card" id="bridge-card" hidden></div>
         <div class="card">
           <h3>Clinical disclaimer</h3>
           <p class="muted">Review the decision-support disclaimer you accepted on first launch.</p>
@@ -5934,7 +5935,7 @@ A({ id:'oncology', name:'Musculoskeletal Oncology / Orthopedic Oncology', ops:[
   const STORES = ['patients', 'visits', 'scores', 'images', 'labfiles', 'settings'];
   const MAGIC = new TextEncoder().encode('ORTHOENC1');   // 9 bytes, then salt(16) iv(12) ciphertext
   const ITER = 200000;
-  const SKIP_SETTINGS = new Set(['lastBackupAt']);
+  const SKIP_SETTINGS = new Set(['lastBackupAt', 'bridgeEnabled']);
 
   const pickBytes = (a, from, to) => a.subarray(from, to);
 
@@ -6130,7 +6131,102 @@ A({ id:'oncology', name:'Musculoskeletal Oncology / Orthopedic Oncology', ops:[
     new MutationObserver(() => { $('#bk-open').hidden = rpw.hidden; }).observe(rpw, { attributes: true, attributeFilter: ['hidden'] });
   }
 
-  global.Backup = { build, parse, restoreReplace, restoreMerge, mount, reminderDue, lastBackupAt, noteBackup };
+  global.Backup = { build, parse, restoreReplace, restoreMerge, mount, reminderDue, lastBackupAt, noteBackup, snapshot };
+})(window);
+
+</script>
+
+  <script>
+/* ===========================================================================
+ * Bridge — optional link to the Claude desktop extension (Windows app only).
+ *   When switched on, a copy of the data (WITHOUT image pixels) is written to
+ *   Documents\OrthoApp-Bridge\orthoapp-data.json a few seconds after any change.
+ *   The extension reads that file; files it leaves as import-from-claude.json are
+ *   imported here with Merge (existing MRNs are never overwritten).
+ *   Off by default. Switching it off deletes the copy. The file is NOT encrypted.
+ * =========================================================================== */
+(function (global) {
+  'use strict';
+  const { h } = Util;
+  const KEY = 'bridgeEnabled';
+  const available = () => !!(global.orthoBridge && global.orthoBridge.write);
+  let enabled = false, timer = null, busy = false, again = false, lastOk = null, lastErr = null, onChange = null;
+
+  const slim = (snap) => {      // drop image pixels; keep labels, dates and measurements
+    snap.stores.images = snap.stores.images.map(({ dataUrl, thumb, ...rest }) => rest);
+    snap.stores.labfiles = snap.stores.labfiles.map(({ dataUrl, ...rest }) => rest);
+    snap.bridge = { writtenAt: new Date().toISOString(), imagePixelsIncluded: false };
+    return snap;
+  };
+
+  async function sync() {
+    if (!available() || !enabled) return;
+    if (busy) { again = true; return; }
+    busy = true;
+    try {
+      const snap = slim(await Backup.snapshot());
+      const r = await global.orthoBridge.write(JSON.stringify(snap));
+      lastOk = r && r.modified; lastErr = null;
+    } catch (e) { lastErr = String(e && e.message || e); }
+    busy = false; if (onChange) onChange();
+    if (again) { again = false; schedule(); }
+  }
+  function schedule() { if (!enabled || !available()) return; clearTimeout(timer); timer = setTimeout(sync, 2500); }
+
+  /** run `fn` after the original returns, so every save, delete and restore refreshes the copy */
+  function watch(obj, names) {
+    names.forEach(n => { const orig = obj[n]; if (typeof orig !== 'function') return; obj[n] = async function (...a) { const r = await orig.apply(this, a); schedule(); return r; }; });
+  }
+
+  async function init() {
+    if (!available()) return;
+    try { enabled = !!(await OrthoDB.getSetting(KEY, false)); } catch (_) { enabled = false; }
+    watch(OrthoDB, ['add', 'put', 'remove', 'deletePatientCascade']);
+    watch(Backup, ['restoreReplace', 'restoreMerge']);
+    if (enabled) schedule();
+  }
+
+  async function setEnabled(on) {
+    enabled = on; await OrthoDB.setSetting(KEY, on);
+    if (on) await sync(); else { clearTimeout(timer); try { await global.orthoBridge.remove(); } catch (_) {} lastOk = null; }
+  }
+
+  async function mount(card) {
+    if (!available()) { card.hidden = true; return; }
+    card.hidden = false;
+    const draw = async () => {
+      const info = await global.orthoBridge.info();
+      const cb = h('input', { id: 'bridge-on', type: 'checkbox', checked: enabled, onchange: async e => {
+        try { await setEnabled(e.target.checked); App.toast(e.target.checked ? 'Copy for the Claude extension is on' : 'Copy deleted and switched off'); } catch (err) { App.toast('Could not change: ' + (err && err.message || err), 'bad'); }
+        draw(); } });
+      card.replaceChildren(
+        h('h3', {}, 'Claude extension (optional)'),
+        h('p', { class: 'muted small' }, 'Lets the OrthoApp extension in the Claude desktop app read your records. While this is on, a copy of your data (without X-ray pixels) is saved in the folder below and refreshed after each change.'),
+        h('label', { class: 'check-row', for: 'bridge-on' }, cb, h('span', {}, h('strong', {}, 'Keep a copy for the Claude extension'),
+          h('div', { class: 'small muted' }, 'The copy is not encrypted and includes patient names. Switch it off to delete it.'))),
+        h('p', { class: 'muted small', style: 'margin:.6rem 0 0' }, info ? `Folder: ${info.dir}` : ''),
+        h('p', { class: 'readout', style: 'margin-top:.5rem' }, !enabled ? 'Off — no copy exists.' : lastErr ? `Could not save the copy: ${lastErr}` : (lastOk || (info && info.modified)) ? `Copy saved ${new Date(lastOk || info.modified).toLocaleString()}.` : 'Saving…'),
+        h('div', { class: 'modal-actions' },
+          h('button', { class: 'btn', type: 'button', disabled: !enabled, onclick: async () => { await sync(); draw(); } }, 'Save now'),
+          h('button', { class: 'btn', type: 'button', onclick: () => global.orthoBridge.openFolder() }, 'Open folder'),
+          info && info.importReady ? h('button', { class: 'btn btn-primary', type: 'button', onclick: importFromClaude }, 'Import file from Claude') : null));
+    };
+    onChange = () => { if (card.isConnected && !card.hidden) draw(); };
+    draw();
+  }
+
+  async function importFromClaude() {
+    try {
+      const text = await global.orthoBridge.readImport(); if (!text) { App.toast('No file from Claude found', 'bad'); return; }
+      const obj = await Backup.parse(new TextEncoder().encode(text));
+      const n = obj.stores.patients.length;
+      if (!(await App.confirm({ title: 'Import from Claude?', message: `Add up to ${n} patient${n === 1 ? '' : 's'} from the file Claude prepared? Patients whose MRN already exists are skipped; nothing is overwritten.`, okLabel: 'Import' }))) return;
+      const r = await Backup.restoreMerge(obj);
+      App.toast(`Imported ${r.added} patient${r.added === 1 ? '' : 's'}, skipped ${r.skipped}`);
+    } catch (e) { App.toast('Could not import: ' + (e && e.message || e), 'bad'); }
+  }
+
+  global.Bridge = { mount, init, _test: { slim, sync } };
 })(window);
 
 </script>
@@ -6143,7 +6239,7 @@ A({ id:'oncology', name:'Musculoskeletal Oncology / Orthopedic Oncology', ops:[
   'use strict';
   const { h, $, $$, fmtDate, round } = Util;
 
-  const APP_VERSION = '0.17.0';
+  const APP_VERSION = '0.17.1';
   const DISCLAIMER_VERSION = 1;   // bump to force re-acceptance after a wording change
 
   const App = window.App = { state: { currentPatientId: null, view: 'patients', tab: 'demo' } };
@@ -6500,6 +6596,7 @@ A({ id:'oncology', name:'Musculoskeletal Oncology / Orthopedic Oncology', ops:[
     $('#app-version').textContent = `OrthoApp ${APP_VERSION} · DB schema v3`;
     Entitlement.mountProCard($('#pro-card'));
     if (window.Backup) Backup.mount($('#backup-root'));
+    if (window.Bridge) Bridge.mount($('#bridge-card'));
   }
 
   /* ------------------------------------------------------------------ boot */
@@ -6523,6 +6620,7 @@ A({ id:'oncology', name:'Musculoskeletal Oncology / Orthopedic Oncology', ops:[
     $('#free-upgrade').addEventListener('click', () => { $('#free-dialog').close(); Entitlement.showUpgrade(); });
     $('#up-close').addEventListener('click', () => $('#upgrade-dialog').close());
     Entitlement.applyClass();
+    if (window.Bridge) { try { await Bridge.init(); } catch (e) { console.warn('Bridge init', e); } }
     $('#btn-del').addEventListener('click', async () => { const p = await OrthoDB.get('patients', App.state.currentPatientId); if (p) P.remove(p); });
     $('#btn-pdf').addEventListener('click', async () => {
       const btn = $('#btn-pdf'); if (btn.disabled) return;
