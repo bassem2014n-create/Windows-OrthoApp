@@ -3478,7 +3478,10 @@ A({ id:'oncology', name:'Musculoskeletal Oncology / Orthopedic Oncology', ops:[
  * Thesis sheet — structured data entry for the medial meniscus extrusion /
  * posterior root tear study. Stored on the patient record as `thesis`.
  * Relative extrusion = absolute extrusion / meniscus width x 100 (computed).
- * Exported as the "Thesis sheet" dataset in the Research Hub (one row per patient).
+ * "Ghost sign" and "tear gap size" only apply when the posterior root is NOT
+ * intact, so the two fields appear only then.
+ * Exported as the "Thesis sheet" dataset in the Research Hub (one row per patient)
+ * and described to the Research Hub as a list of study variables (variables()).
  * =========================================================================== */
 (function (global) {
   'use strict';
@@ -3490,32 +3493,75 @@ A({ id:'oncology', name:'Musculoskeletal Oncology / Orthopedic Oncology', ops:[
   const KL = ['', '0', '1', '2', '3', '4'];
   const OB = ['', '0', '1', '2', '3', '4'];
   const YN = ['', 'No', 'Yes'];
-  /* key, label, type, options/unit */
+  const TEAR = 'tear';                      // field is shown only when the root is not intact
+  /* key, label, type, options/unit, [when] */
   const SECTIONS = [
     ['Study', [['group', 'Study group', 'select', GROUPS], ['symMonths', 'Symptoms to imaging (months)', 'num', 'months'], ['popping', 'Popping at onset', 'select', YN]]],
     ['MRI', [['extMm', 'Absolute medial meniscus extrusion (mm)', 'num', 'mm'], ['widthMm', 'Meniscus width (mm)', 'num', 'mm'],
-      ['root', 'Posterior root', 'select', ROOT], ['mtl', 'Menisco-tibial ligament', 'select', LIG], ['gap', 'Meniscal tear gap', 'select', YN],
+      ['root', 'Posterior root', 'select', ROOT],
+      ['ghost', 'Ghost sign present', 'select', YN, TEAR], ['gapMm', 'Tear gap size (mm)', 'num', 'mm', TEAR],
+      ['mtl', 'Menisco-tibial ligament', 'select', LIG],
       ['edema', 'Subchondral bone marrow oedema', 'select', EDEMA], ['outer', 'Outerbridge grade', 'select', OB]]],
     ['X-ray', [['kl', 'Kellgren-Lawrence grade', 'select', KL], ['osteo', 'Medial osteophyte', 'select', YN], ['osteoMm', 'Osteophyte size (mm)', 'num', 'mm'],
       ['mtfa', 'MTFA (deg)', 'num', 'deg'], ['mldfa', 'mLDFA (deg)', 'num', 'deg'], ['mpta', 'MPTA (deg)', 'num', 'deg'], ['mpts', 'Medial posterior tibial slope (deg)', 'num', 'deg']]],
     ['Patient-reported', [['koos12', 'KOOS-12 (0-100)', 'num', 'pts'], ['vas', 'VAS pain (0-10)', 'num', 'pts']]],
   ];
   const ALL = SECTIONS.flatMap(s => s[1]);
+  const has = (v) => v !== '' && v != null;
+  const numOrNull = (v) => { if (!has(v)) return null; const n = parseFloat(v); return Number.isFinite(n) ? n : null; };
   const rel = t => { const e = parseFloat(t.extMm), w = parseFloat(t.widthMm); return (e >= 0 && w > 0) ? Math.round(e / w * 1000) / 10 : null; };
+
+  /** The ghost-sign / tear-gap fields are visible when the root is not intact (or when values were already saved). */
+  const tearApplies = (t) => !!t.root && t.root !== 'Intact';
+  const tearShown = (t) => tearApplies(t) || (t.root !== 'Intact' && (has(t.ghost) || has(t.gapMm)));
+  /** value of a field as it counts for analysis/export (tear-only fields are blank for an intact root) */
+  const valueOf = (t, f) => (f[4] === TEAR && t.root === 'Intact') ? '' : t[f[0]];
+
+  /* ---------------------------------------------------------------- CSV headers */
+  const fieldLabel = (f) => f[0] === 'popping' ? 'Popping at onset' : f[1];
+  const LABELS = Object.assign({
+    patient_id: 'Patient ID', mrn: 'MRN', name: 'Patient name', age_years: 'Age (years)', sex: 'Sex', affected_side: 'Affected side', bmi: 'BMI (kg/m²)',
+    thesis_rel_extrusion_pct: 'Relative medial meniscus extrusion (%)', thesis_extrusion_ge3mm: 'Absolute extrusion 3 mm or more', thesis_notes: 'Thesis notes',
+  }, Object.fromEntries(ALL.map(f => ['thesis_' + f[0], fieldLabel(f)])));
+  const COLS = ['patient_id', 'mrn', 'name', 'age_years', 'sex', 'affected_side', 'bmi', ...ALL.map(a => 'thesis_' + a[0]), 'thesis_rel_extrusion_pct', 'thesis_extrusion_ge3mm', 'thesis_notes'];
 
   /** One flat row for the CSV export. */
   function row(p) {
     const t = p.thesis || {}, d = p.demographics || {}, hh = parseFloat(d.heightCm), w = parseFloat(d.weightKg);
     const out = { patient_id: p.id, mrn: p.mrn, name: p.name, age_years: d.age === '' || d.age == null ? null : Number(d.age), sex: d.sex || '', affected_side: d.affectedSide || '',
       bmi: (hh > 0 && w > 0) ? Math.round(w / ((hh / 100) ** 2) * 10) / 10 : null };
-    ALL.forEach(([k, , type]) => { out['thesis_' + k] = type === 'num' ? (t[k] === '' || t[k] == null ? null : Number(t[k])) : (t[k] || ''); });
+    ALL.forEach(f => { const v = valueOf(t, f); out['thesis_' + f[0]] = f[2] === 'num' ? numOrNull(v) : (v || ''); });
     out.thesis_rel_extrusion_pct = rel(t);
     out.thesis_extrusion_ge3mm = t.extMm === '' || t.extMm == null ? '' : (parseFloat(t.extMm) >= 3 ? 'yes' : 'no');
     out.thesis_notes = t.notes || '';
     return out;
   }
-  const COLS = ['patient_id', 'mrn', 'name', 'age_years', 'sex', 'affected_side', 'bmi', ...ALL.map(a => 'thesis_' + a[0]), 'thesis_rel_extrusion_pct', 'thesis_extrusion_ge3mm', 'thesis_notes'];
 
+  /* --------------------------------------------------------- study variables */
+  /** Every analysable item of the study, for the Research Hub (cohort filters and associations).
+   *  kind: 'num' number · 'cat' unordered categories · 'ord' ordered grades (options listed low → high). */
+  const SIDE = { L: 'Left', R: 'Right', B: 'Bilateral' }, SEXN = { M: 'Male', F: 'Female', O: 'Other' };
+  function variables() {
+    const ORD = new Set(['mtl', 'edema', 'outer', 'kl']);
+    const out = [];
+    const demo = (key, label, kind, options, get) => out.push({ key, label, section: 'Patient', kind, options, unit: '', get });
+    demo('age', 'Age (years)', 'num', null, p => { const d = p.demographics || {}; const a = Exporter.ageFrom(d.dob); return a ?? numOrNull(d.age); });
+    demo('sex', 'Sex', 'cat', ['Male', 'Female', 'Other'], p => SEXN[(p.demographics || {}).sex] || null);
+    demo('bmi', 'BMI (kg/m²)', 'num', null, p => { const d = p.demographics || {}, hh = parseFloat(d.heightCm), w = parseFloat(d.weightKg); return (hh > 0 && w > 0) ? Math.round(w / ((hh / 100) ** 2) * 10) / 10 : null; });
+    demo('side', 'Affected side', 'cat', ['Left', 'Right', 'Bilateral'], p => SIDE[(p.demographics || {}).affectedSide] || null);
+    SECTIONS.forEach(([section, fields]) => fields.forEach(f => {
+      const [key, , type, opt] = f;
+      const v = { key, label: fieldLabel(f), section, kind: type === 'num' ? 'num' : ORD.has(key) ? 'ord' : 'cat', options: type === 'select' ? opt.filter(Boolean) : null, unit: type === 'num' ? opt : '' };
+      v.get = type === 'num' ? (p => numOrNull(valueOf(p.thesis || {}, f))) : (p => { const x = valueOf(p.thesis || {}, f); return has(x) ? String(x) : null; });
+      out.push(v);
+    }));
+    out.push({ key: 'relExt', label: 'Relative medial meniscus extrusion (%)', section: 'MRI', kind: 'num', options: null, unit: '%', get: p => rel(p.thesis || {}) });
+    out.push({ key: 'ext3', label: 'Absolute extrusion 3 mm or more', section: 'MRI', kind: 'cat', options: ['No', 'Yes'], unit: '',
+      get: p => { const e = numOrNull((p.thesis || {}).extMm); return e == null ? null : e >= 3 ? 'Yes' : 'No'; } });
+    return out;
+  }
+
+  /* ------------------------------------------------------------------- form */
   async function mount(root, p) {
     let cur = await OrthoDB.get('patients', p.id);
     const t = Object.assign({}, cur.thesis || {});
@@ -3523,18 +3569,23 @@ A({ id:'oncology', name:'Musculoskeletal Oncology / Orthopedic Oncology', ops:[
     const persist = async () => { const c = await OrthoDB.get('patients', p.id); await OrthoDB.put('patients', Object.assign({}, c, { thesis: Object.assign({}, t), updatedAt: Date.now() })); };
     const queue = () => { clearTimeout(timer); timer = setTimeout(async () => { await persist(); readout(); }, 400); };
     const readoutEl = h('div', { class: 'readout', id: 'th-readout' });
+    const conditional = [];
+    const refreshConditional = () => conditional.forEach(el => { el.hidden = !tearShown(t); });
     function readout() {
       const r = rel(t), e = parseFloat(t.extMm);
       readoutEl.textContent = r == null ? 'Relative extrusion: enter absolute extrusion and meniscus width.'
         : `Relative extrusion ${r}%` + (e >= 3 ? ' · absolute extrusion 3 mm or more' : ' · absolute extrusion under 3 mm');
     }
-    const ctl = ([k, label, type, opt]) => {
+    const ctl = ([k, label, type, opt, when]) => {
       const id = 'th-' + k;
+      const onSelect = e => { t[k] = e.target.value; if (k === 'root') refreshConditional(); queue(); };
       const input = type === 'select'
-        ? h('select', { id, onchange: e => { t[k] = e.target.value; queue(); } }, opt.map(o => h('option', { value: o }, o || 'Select…')))
+        ? h('select', { id, onchange: onSelect }, opt.map(o => h('option', { value: o }, o || 'Select…')))
         : h('input', { id, type: 'number', inputmode: 'decimal', step: 'any', 'aria-label': label, oninput: e => { t[k] = e.target.value; readout(); queue(); } });
       input.value = t[k] == null ? '' : t[k];
-      return h('div', { class: 'field' }, h('label', { for: id }, label), input);
+      const field = h('div', { class: 'field', id: 'field-' + k }, h('label', { for: id }, label), input);
+      if (when === TEAR) { conditional.push(field); field.hidden = !tearShown(t); }
+      return field;
     };
     const notes = h('textarea', { id: 'th-notes', rows: 3, maxlength: 2000, placeholder: 'Thesis notes for this patient', oninput: e => { t.notes = e.target.value; queue(); } });
     notes.value = t.notes || '';
@@ -3543,22 +3594,22 @@ A({ id:'oncology', name:'Musculoskeletal Oncology / Orthopedic Oncology', ops:[
     readout();
     root.replaceChildren(
       h('div', { class: 'card' }, h('h3', {}, 'Thesis sheet'),
-        h('p', { class: 'muted small' }, 'Medial meniscus extrusion and posterior root tear study. Saves automatically. Relative extrusion is calculated for you.'),
+        h('p', { class: 'muted small' }, 'Medial meniscus extrusion and posterior root tear study. Saves automatically. Relative extrusion is calculated for you. Ghost sign and tear gap size appear when the posterior root is not intact.'),
         readoutEl),
       ...SECTIONS.map(([title, fields]) => h('div', { class: 'card' }, h('h3', {}, title), h('div', { class: 'form-grid' }, fields.map(ctl)))),
       h('div', { class: 'card' }, h('h3', {}, 'Notes'), notes),
       h('div', { class: 'card' }, h('h3', {}, 'All patients'),
-        h('p', { class: 'muted small' }, `${filled} of ${all.length} patients have thesis data. The table opens in Excel / SPSS.`),
+        h('p', { class: 'muted small' }, `${filled} of ${all.length} patients have thesis data. The table opens in Excel / SPSS; column headings use the same names as the items in this form.`),
         h('button', { class: 'btn btn-primary', type: 'button', onclick: async () => {
           await persist();
           const D = await Exporter.load();
-          const csv = Exporter.toCSV(COLS, D.patients.filter(x => x.thesis).sort((a, b) => a.nameLower.localeCompare(b.nameLower)).map(row));
+          const csv = Exporter.toCSV(COLS, D.patients.filter(x => x.thesis).sort((a, b) => a.nameLower.localeCompare(b.nameLower)).map(row), LABELS);
           const name = 'orthoapp_thesis_sheet_' + Util.todayISO() + '.csv';
           try { await Research.saveFile(name, csv); App.toast(Util.isNative() ? 'Saved to your Downloads folder' : 'CSV downloaded'); }
           catch (e) { App.toast('Could not save: ' + (e && e.message || e), 'bad'); }
         } }, 'Download thesis table (CSV)')));
   }
-  global.Thesis = { mount, row, COLS, rel };
+  global.Thesis = { mount, row, COLS, LABELS, rel, variables, tearApplies, _test: { tearShown } };
 })(window);
 
 </script>
@@ -4351,11 +4402,237 @@ A({ id:'oncology', name:'Musculoskeletal Oncology / Orthopedic Oncology', ops:[
     return { a: da, b: db, t, df, p: tTwoSidedP(t, df) };
   }
 
+  /* ---- regularised incomplete gamma → chi-square tail (Numerical Recipes gser / gcf) ---- */
+  function gammaP(a, x) {
+    if (x <= 0) return 0;
+    if (x < a + 1) {
+      let ap = a, del = 1 / a, s = del;
+      for (let n = 0; n < 500; n++) { ap += 1; del *= x / ap; s += del; if (Math.abs(del) < Math.abs(s) * 1e-14) break; }
+      return s * Math.exp(-x + a * Math.log(x) - lgamma(a));
+    }
+    const FPMIN = 1e-300; let b = x + 1 - a, c = 1 / FPMIN, d = 1 / b, hh = d;
+    for (let i = 1; i < 500; i++) {
+      const an = -i * (i - a); b += 2;
+      d = an * d + b; if (Math.abs(d) < FPMIN) d = FPMIN; c = b + an / c; if (Math.abs(c) < FPMIN) c = FPMIN;
+      d = 1 / d; const del = d * c; hh *= del; if (Math.abs(del - 1) < 1e-14) break;
+    }
+    return 1 - Math.exp(-x + a * Math.log(x) - lgamma(a)) * hh;
+  }
+  /** upper-tail p of a chi-square statistic */
+  const chi2P = (x, df) => (x <= 0 || df <= 0 ? 1 : Math.min(1, Math.max(0, 1 - gammaP(df / 2, x / 2))));
+  /** upper-tail p of an F statistic */
+  const fP = (F, d1, d2) => (F <= 0 || d1 <= 0 || d2 <= 0 ? 1 : betai(d2 / 2, d1 / 2, d2 / (d2 + d1 * F)));
+  /** two-sided p of a standard-normal z */
+  const normP = (z) => chi2P(z * z, 1);
+
+  /** average ranks (1-based, ties share the mean rank) + the tie term Σ(t³−t) */
+  function ranks(a) {
+    const idx = a.map((v, i) => [v, i]).sort((p, q) => p[0] - q[0]), r = new Array(a.length); let tie = 0;
+    for (let i = 0; i < idx.length;) {
+      let j = i; while (j + 1 < idx.length && idx[j + 1][0] === idx[i][0]) j++;
+      const avg = (i + j) / 2 + 1; for (let k = i; k <= j; k++) r[idx[k][1]] = avg;
+      const t = j - i + 1; if (t > 1) tie += t ** 3 - t; i = j + 1;
+    }
+    return { r, tie };
+  }
+  const finitePairs = (x, y) => { const px = [], py = []; for (let i = 0; i < Math.min(x.length, y.length); i++) if (Number.isFinite(x[i]) && Number.isFinite(y[i])) { px.push(x[i]); py.push(y[i]); } return [px, py]; };
+
+  /** Spearman rank correlation (Pearson on average ranks; t-approximation p) */
+  function spearman(x, y) {
+    const [px, py] = finitePairs(x, y);
+    const o = pearson(ranks(px).r, ranks(py).r);
+    return { n: o.n, rho: o.r, p: o.p };
+  }
+
+  /** Mann–Whitney U. Exact distribution when there are no ties and n1+n2 ≤ 40, otherwise normal approximation (tie- and continuity-corrected). */
+  function mannWhitney(a, b) {
+    const n1 = a.length, n2 = b.length;
+    if (n1 < 1 || n2 < 1) return { n1, n2, u: null, p: null, exact: false };
+    const all = a.concat(b), { r, tie } = ranks(all), N = n1 + n2;
+    let r1 = 0; for (let i = 0; i < n1; i++) r1 += r[i];
+    const u1 = r1 - n1 * (n1 + 1) / 2, u2 = n1 * n2 - u1, u = Math.min(u1, u2);
+    if (!tie && N <= 40) {
+      // number of ways to pick n1 ranks from 1..N with a given sum → distribution of U1
+      const maxSum = N * (N + 1) / 2, dp = Array.from({ length: n1 + 1 }, () => new Float64Array(maxSum + 1)); dp[0][0] = 1;
+      for (let v = 1; v <= N; v++) for (let k = Math.min(v, n1); k >= 1; k--) for (let s = maxSum; s >= v; s--) dp[k][s] += dp[k - 1][s - v];
+      let total = 0, le = 0, ge = 0; const row = dp[n1];
+      for (let s = 0; s <= maxSum; s++) { const w = row[s]; if (!w) continue; total += w; const uu = s - n1 * (n1 + 1) / 2; if (uu <= u1 + 1e-9) le += w; if (uu >= u1 - 1e-9) ge += w; }
+      return { n1, n2, u, u1, p: Math.min(1, 2 * Math.min(le, ge) / total), exact: true };
+    }
+    const mu = n1 * n2 / 2, sigma = Math.sqrt(n1 * n2 / 12 * ((N + 1) - tie / (N * (N - 1))));
+    if (!(sigma > 0)) return { n1, n2, u, u1, p: 1, exact: false };
+    const z = (Math.abs(u1 - mu) - 0.5) / sigma;
+    return { n1, n2, u, u1, z, p: normP(Math.max(0, z)), exact: false };
+  }
+
+  /** One-way ANOVA across k groups (arrays of numbers) */
+  function anova(groups) {
+    const gs = groups.filter(g => g.length > 0), k = gs.length, N = sum(gs.map(g => g.length));
+    if (k < 2 || N - k < 1) return { k, N, F: null, p: null };
+    const gm = sum(gs.map(g => sum(g))) / N;
+    const ssb = sum(gs.map(g => g.length * (mean(g) - gm) ** 2)), ssw = sum(gs.map(g => sum(g.map(x => (x - mean(g)) ** 2))));
+    const df1 = k - 1, df2 = N - k;
+    if (ssw === 0) return { k, N, F: null, df1, df2, p: ssb === 0 ? 1 : null };
+    const F = (ssb / df1) / (ssw / df2);
+    return { k, N, F, df1, df2, p: fP(F, df1, df2), eta2: ssb / (ssb + ssw) };
+  }
+
+  /** Kruskal–Wallis H (tie-corrected, chi-square approximation) */
+  function kruskal(groups) {
+    const gs = groups.filter(g => g.length > 0), k = gs.length, all = [].concat(...gs), N = all.length;
+    if (k < 2 || N < 3) return { k, N, H: null, p: null };
+    const { r, tie } = ranks(all); let pos = 0, h = 0;
+    gs.forEach(g => { let s = 0; for (let i = 0; i < g.length; i++) s += r[pos + i]; pos += g.length; h += s * s / g.length; });
+    h = 12 / (N * (N + 1)) * h - 3 * (N + 1);
+    const corr = 1 - tie / (N ** 3 - N); if (corr <= 0) return { k, N, H: null, p: 1 };
+    h /= corr;
+    return { k, N, H: h, df: k - 1, p: chi2P(h, k - 1) };
+  }
+
+  /** Cohen's d with pooled SD */
+  function cohenD(a, b) {
+    if (a.length < 2 || b.length < 2) return null;
+    const sp = Math.sqrt(((a.length - 1) * sd(a) ** 2 + (b.length - 1) * sd(b) ** 2) / (a.length + b.length - 2));
+    return sp > 0 ? (mean(a) - mean(b)) / sp : null;
+  }
+
+  /** Fisher's exact test for a 2×2 table [[a,b],[c,d]] (two-sided, sum of tables no more likely than observed) + odds ratio with 95 % CI (Woolf; 0.5 added when a cell is 0) */
+  function fisher2x2(a, b, c, d) {
+    const r1 = a + b, r2 = c + d, c1 = a + c, n = r1 + r2;
+    if (!n) return { p: null, or: null, ci: null };
+    const lf = (k) => lgamma(k + 1), lp = (x) => lf(r1) + lf(r2) + lf(c1) + lf(n - c1) - lf(n) - lf(x) - lf(r1 - x) - lf(c1 - x) - lf(r2 - c1 + x);
+    const lo = Math.max(0, c1 - r2), hi = Math.min(r1, c1), p0 = lp(a); let p = 0;
+    for (let x = lo; x <= hi; x++) { const px = lp(x); if (px <= p0 + 1e-7) p += Math.exp(px); }
+    const z = (a === 0 || b === 0 || c === 0 || d === 0) ? 0.5 : 0, A = a + z, B = b + z, C = c + z, D = d + z;
+    const or = (A * D) / (B * C), se = Math.sqrt(1 / A + 1 / B + 1 / C + 1 / D);
+    return { p: Math.min(1, p), or, ci: [Math.exp(Math.log(or) - 1.959964 * se), Math.exp(Math.log(or) + 1.959964 * se)], corrected: z > 0 };
+  }
+
+  /** Pearson chi-square test of independence for an r×c table of counts */
+  function chiSquare(table) {
+    const R = table.length, C = R ? table[0].length : 0, n = sum(table.map(sum));
+    const rows = table.map(sum), cols = Array.from({ length: C }, (_, j) => sum(table.map(r => r[j])));
+    if (R < 2 || C < 2 || !n || rows.some(x => x === 0) || cols.some(x => x === 0)) return { chi2: null, df: null, p: null, minExpected: null, lowCells: 0, cells: R * C };
+    let chi2 = 0, minE = Infinity, low = 0;
+    for (let i = 0; i < R; i++) for (let j = 0; j < C; j++) { const e = rows[i] * cols[j] / n; chi2 += (table[i][j] - e) ** 2 / e; minE = Math.min(minE, e); if (e < 5) low++; }
+    const df = (R - 1) * (C - 1);
+    return { chi2, df, p: chi2P(chi2, df), minExpected: minE, lowCells: low, cells: R * C };
+  }
+
   const fx = (v, dp = 1) => (v === null || v === undefined || !Number.isFinite(v) ? '—' : (Math.round((v + Number.EPSILON) * 10 ** dp) / 10 ** dp).toFixed(dp));
   const fp = (p) => (p === null || p === undefined ? '—' : p < 0.001 ? '<0.001' : p.toFixed(3));
   const msd = (d, dp = 1) => (d ? `${fx(d.mean, dp)}${d.sd === null ? '' : ' ± ' + fx(d.sd, dp)} (${fx(d.min, dp)}–${fx(d.max, dp)})` : '—');
 
-  global.Stats = { pearson, welch, mean, sd, describe, paired, wilson, tTwoSidedP, tCrit, fx, fp, msd };
+  global.Stats = { pearson, welch, mean, sd, describe, paired, wilson, tTwoSidedP, tCrit, fx, fp, msd,
+    chi2P, fP, normP, ranks, spearman, mannWhitney, anova, kruskal, cohenD, fisher2x2, chiSquare };
+})(window);
+
+</script>
+  <script>
+/* ===========================================================================
+ * Assoc — cross-sectional associations between study variables (pure functions).
+ *   A variable is { key, label, kind: 'num' | 'cat' | 'ord', options?, get(patient) }.
+ *   compare(X, Y, patients)  picks the test from the two variable types:
+ *     number × number       Spearman (ranks) and Pearson
+ *     category × number     2 groups: Welch t, Mann–Whitney U, Cohen's d · 3+ groups: ANOVA, Kruskal–Wallis
+ *     category × category   contingency table, chi-square, Fisher's exact + odds ratio for 2 × 2
+ *   Patients with a missing value for either variable are left out of that comparison only.
+ *   table1(G, vars, patients) = "characteristics by group" with one p-value per variable.
+ *   These describe association in the recorded cohort — they do not prove cause.
+ * =========================================================================== */
+(function (global) {
+  'use strict';
+  const S = Stats;
+
+  const kindOf = (v, ordAsCat) => v.kind === 'ord' ? (ordAsCat ? 'cat' : 'num') : v.kind;
+  /** numeric value of a variable for one patient (ordered grades → their position in the option list) */
+  function numeric(v, p) {
+    const x = v.get(p); if (x == null) return null;
+    if (v.kind === 'ord') { const i = v.options.indexOf(String(x)); return i < 0 ? null : i; }
+    return Number.isFinite(x) ? x : null;
+  }
+  const category = (v, p) => { const x = v.get(p); return x == null ? null : String(x); };
+
+  function quantile(sorted, q) {
+    if (!sorted.length) return null; const pos = (sorted.length - 1) * q, lo = Math.floor(pos), hi = Math.ceil(pos);
+    return sorted[lo] + (sorted[hi] - sorted[lo]) * (pos - lo);
+  }
+  function describe(a) {
+    if (!a.length) return null;
+    const s = a.slice().sort((x, y) => x - y), d = S.describe(a);
+    return { ...d, median: quantile(s, .5), q1: quantile(s, .25), q3: quantile(s, .75) };
+  }
+
+  /** Split patients into the groups of a categorical variable (options order), keeping the numeric outcome. */
+  function groupNumbers(C, N, patients) {
+    const by = new Map(C.options.map(o => [o, []]));
+    patients.forEach(p => { const c = category(C, p), n = numeric(N, p); if (c != null && n != null && by.has(c)) by.get(c).push(n); });
+    return [...by.entries()].filter(([, a]) => a.length).map(([name, values]) => ({ name, values, d: describe(values) }));
+  }
+  function crossTab(A, B, patients) {
+    const rows = A.options.slice(), cols = B.options.slice(), cnt = rows.map(() => cols.map(() => 0));
+    patients.forEach(p => { const a = category(A, p), b = category(B, p); if (a == null || b == null) return; const i = rows.indexOf(a), j = cols.indexOf(b); if (i >= 0 && j >= 0) cnt[i][j]++; });
+    // drop empty rows / columns so the test sees only categories that occur
+    const keepR = rows.map((_, i) => cnt[i].some(x => x > 0)), keepC = cols.map((_, j) => cnt.some(r => r[j] > 0));
+    return { rows: rows.filter((_, i) => keepR[i]), cols: cols.filter((_, j) => keepC[j]),
+      counts: cnt.filter((_, i) => keepR[i]).map(r => r.filter((_, j) => keepC[j])) };
+  }
+
+  /** Compare two variables over a list of patients. */
+  function compare(X, Y, patients, opts = {}) {
+    const kx = kindOf(X, opts.ordAsCat), ky = kindOf(Y, opts.ordAsCat);
+    if (X.key === Y.key) return { type: 'same' };
+    if (kx === 'num' && ky === 'num') {
+      const x = [], y = [];
+      patients.forEach(p => { const a = numeric(X, p), b = numeric(Y, p); if (a != null && b != null) { x.push(a); y.push(b); } });
+      return { type: 'numnum', X, Y, n: x.length, x, y, pearson: S.pearson(x, y), spearman: S.spearman(x, y) };
+    }
+    if (kx === 'cat' && ky === 'cat') {
+      const tab = crossTab(X, Y, patients), n = tab.counts.reduce((s, r) => s + r.reduce((a, b) => a + b, 0), 0);
+      const chi = S.chiSquare(tab.counts), is22 = tab.rows.length === 2 && tab.cols.length === 2;
+      return { type: 'catcat', X, Y, n, tab, chi, fisher: is22 ? S.fisher2x2(tab.counts[0][0], tab.counts[0][1], tab.counts[1][0], tab.counts[1][1]) : null };
+    }
+    const C = kx === 'cat' ? X : Y, N = kx === 'cat' ? Y : X, groups = groupNumbers(C, N, patients), n = groups.reduce((s, g) => s + g.values.length, 0);
+    const out = { type: 'catnum', C, N, groups, n };
+    if (groups.length === 2) {
+      const [a, b] = groups; out.welch = S.welch(a.values, b.values); out.mw = S.mannWhitney(a.values, b.values); out.d = S.cohenD(a.values, b.values);
+    } else if (groups.length > 2) { const vs = groups.map(g => g.values); out.anova = S.anova(vs); out.kruskal = S.kruskal(vs); }
+    return out;
+  }
+
+  /** "Characteristics by group": one row per variable (and per category for categorical ones). */
+  function table1(G, vars, patients, opts = {}) {
+    G = { ...G, kind: 'cat' };                           // an ordered grade used as the grouping variable is split into its categories
+    const groups = G.options.filter(o => patients.some(p => category(G, p) === o));
+    const inG = patients.filter(p => category(G, p) != null);
+    const fx = S.fx, fp = S.fp;
+    const rows = [{ label: 'Patients', head: true, test: '', p: null, cells: groups.map(g => String(inG.filter(p => category(G, p) === g).length)) }];
+    vars.filter(v => v.key !== G.key).forEach(v => {
+      const kv = kindOf(v, opts.ordAsCat), r = compare(G, v, inG, opts);
+      if (kv === 'num') {
+        const cells = groups.map(g => {
+          const a = inG.filter(p => category(G, p) === g).map(p => numeric(v, p)).filter(x => x != null), d = describe(a);
+          if (!d) return '—';
+          const dp = 1;
+          return opts.nonparam ? `${fx(d.median, dp)} [${fx(d.q1, dp)}–${fx(d.q3, dp)}] (n=${d.n})` : `${fx(d.mean, dp)}${d.sd == null ? '' : ' ± ' + fx(d.sd, dp)} (n=${d.n})`;
+        });
+        let test = '', p = null;
+        if (r.groups && r.groups.length === 2) { test = opts.nonparam ? 'Mann–Whitney U' : 'Welch t-test'; p = opts.nonparam ? r.mw.p : r.welch.p; }
+        else if (r.groups && r.groups.length > 2) { test = opts.nonparam ? 'Kruskal–Wallis' : 'ANOVA'; p = opts.nonparam ? r.kruskal.p : r.anova.p; }
+        rows.push({ label: v.label + (v.unit && !/\(/.test(v.label) ? ` (${v.unit})` : '') + (opts.nonparam ? ' — median [IQR]' : ' — mean ± SD'), test, p, cells });
+      } else {
+        const t = r.tab; if (!t || !t.rows.length) { rows.push({ label: v.label, test: '', p: null, cells: groups.map(() => '—') }); return; }
+        const p = r.fisher ? r.fisher.p : r.chi.p, test = p == null ? 'n/a (one category only)' : r.fisher ? "Fisher's exact" : 'Chi-square';
+        const colTotal = groups.map(g => { const gi = t.rows.indexOf(g); return gi < 0 ? 0 : t.counts[gi].reduce((a, b) => a + b, 0); });
+        rows.push({ label: v.label, head: true, test, p, cells: groups.map(() => ''), warn: !r.fisher && r.chi.lowCells > 0 });
+        t.cols.forEach((cname, j) => rows.push({ label: cname, sub: true, test: '', p: null, cells: groups.map((g, gi) => {
+          const i = t.rows.indexOf(g); if (i < 0) return '0'; const n = t.counts[i][j], tot = colTotal[gi]; return tot ? `${n} (${fx(100 * n / tot, 0)}%)` : '0'; }) }));
+      }
+    });
+    return { groups, rows };
+  }
+
+  global.Assoc = { compare, table1, kindOf, numeric, category, describe, _test: { crossTab } };
 })(window);
 
 </script>
@@ -4685,7 +4962,8 @@ A({ id:'oncology', name:'Musculoskeletal Oncology / Orthopedic Oncology', ops:[
     if (/^[=+@\t\r]/.test(s) || (/^-/.test(s) && !/^-?\d+(\.\d+)?$/.test(s))) s = "'" + s;   // formula-injection guard
     return /[",\r\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
   }
-  const toCSV = (cols, rows) => [cols.map(cell).join(','), ...rows.map(r => cols.map(c => cell(r[c])).join(','))].join('\r\n');
+  /** CSV text. `labels` (optional) maps a column key to the heading printed in the file. */
+  const toCSV = (cols, rows, labels) => [cols.map(c => cell(labels && labels[c] || c)).join(','), ...rows.map(r => cols.map(c => cell(r[c])).join(','))].join('\r\n');
   const slug = (s) => String(s).toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_|_$/g, '');
   const latest = (arr) => arr.slice().sort((a, b) => (a.assessedOn || '').localeCompare(b.assessedOn || '') || a.createdAt - b.createdAt).pop();
   const unitOf = (text) => /mm$/.test(text) ? 'mm' : /°$/.test(text) ? 'deg' : /px$/.test(text) ? 'px' : '';
@@ -4786,6 +5064,16 @@ A({ id:'oncology', name:'Musculoskeletal Oncology / Orthopedic Oncology', ops:[
     'dominant_hand', 'affected_side', 'activity_level', 'smoking', 'injury_date', 'comorbidities', 'notes', 'diagnosis', 'procedure', 'implant', 'followup_months',
     'complication_count', 'complication_types', 'nonunion', 'revision'];
 
+  /** Column headings printed in the CSV files (the keys above stay stable for code). */
+  const PATIENT_LABELS = {
+    patient_id: 'Patient ID', mrn: 'MRN', name: 'Patient name', subgroups: 'Research subgroups', surgery_date: 'Date of surgery', dob: 'Date of birth',
+    age_years: 'Age (years)', age_at_surgery: 'Age at surgery (years)', sex: 'Sex', height_cm: 'Height (cm)', weight_kg: 'Weight (kg)', bmi: 'BMI (kg/m²)',
+    occupation: 'Occupation', dominant_hand: 'Dominant hand', affected_side: 'Affected side', activity_level: 'Activity level', smoking: 'Smoking',
+    injury_date: 'Date of injury', comorbidities: 'Comorbidities', notes: 'Demographic notes', diagnosis: 'Diagnosis', procedure: 'Surgical procedure',
+    implant: 'Implant / device', followup_months: 'Follow-up (months)', complication_count: 'Number of complications', complication_types: 'Complication types',
+    nonunion: 'Nonunion', revision: 'Revision surgery',
+  };
+
   const BUILDERS = {
     labs(D) {
       const rows = [];
@@ -4797,11 +5085,11 @@ A({ id:'oncology', name:'Musculoskeletal Oncology / Orthopedic Oncology', ops:[
       return { cols: ['patient_id', 'mrn', 'name', 'subgroups', 'lab_order', 'lab_date', 'months_since_surgery', 'test', 'value', 'unit', 'ref_low', 'ref_high', 'flag', 'lab_note'], rows };
     },
     thesis(D) {
-      return { cols: Thesis.COLS, rows: D.patients.filter(p => p.thesis && Object.keys(p.thesis).length).map(Thesis.row) };
+      return { cols: Thesis.COLS, labels: Thesis.LABELS, rows: D.patients.filter(p => p.thesis && Object.keys(p.thesis).length).map(Thesis.row) };
     },
     patients(D, meta) {
       const dxCols = new Set(); const rows = D.patients.map(p => { const r = patientRow(p, meta); Object.keys(r).filter(k => k.startsWith('dx_')).forEach(k => dxCols.add(k)); return r; });
-      return { cols: [...PATIENT_COLS, ...[...dxCols].sort()], rows };
+      return { cols: [...PATIENT_COLS, ...[...dxCols].sort()], labels: PATIENT_LABELS, rows };
     },
 
     visits(D, meta) {
@@ -4895,7 +5183,7 @@ A({ id:'oncology', name:'Musculoskeletal Oncology / Orthopedic Oncology', ops:[
         const pre = row[`${m[1]}_pre-op`], cur = row[c];
         if (typeof pre === 'number' && typeof cur === 'number') { const cc = `${m[1]}_change_${m[2] === 'post-op' ? 'postop' : 'followup'}_vs_preop`; row[cc] = round(cur - pre, 2); changeCols.add(cc); }
       }));
-      return { cols: [...PATIENT_COLS, ...[...dxCols].sort(), ...[...extra].sort(), ...[...changeCols].sort()], rows };
+      return { cols: [...PATIENT_COLS, ...[...dxCols].sort(), ...[...extra].sort(), ...[...changeCols].sort()], labels: PATIENT_LABELS, rows };
     },
   };
 
@@ -4932,8 +5220,9 @@ A({ id:'oncology', name:'Musculoskeletal Oncology / Orthopedic Oncology', ops:[
     const meta = patientMeta(D);
     let out = BUILDERS[dataset](D, meta);
     let key = null, warnings = [];
-    if (opts.deid) { const r = deidentify(dataset, out, D, meta); out = { cols: r.cols, rows: r.rows }; key = r.key; warnings = r.warnings; }
-    return { ...out, csv: toCSV(out.cols, out.rows), key, warnings,
+    if (opts.deid) { const r = deidentify(dataset, out, D, meta); out = { cols: r.cols, rows: r.rows, labels: out.labels }; key = r.key; warnings = r.warnings; }
+    const labels = Object.assign({ study_id: 'Study ID', age: 'Age (years)' }, out.labels || {});
+    return { ...out, csv: toCSV(out.cols, out.rows, labels), key, warnings,
       filename: `orthoapp_${opts.deid ? 'deidentified_' : ''}${dataset}_${todayISO()}.csv` };
   }
 
@@ -5209,9 +5498,10 @@ A({ id:'oncology', name:'Musculoskeletal Oncology / Orthopedic Oncology', ops:[
   <script>
 /* ===========================================================================
  * Research Hub — top-level screen aggregating every saved patient.
- *   A. Cohort Builder   multi-variable filters + live "X patients match"
+ *   A. Cohort Builder   multi-variable filters + live "X patients match" (incl. every Thesis item)
  *   B. Analytics        outcome improvement · radiographic delta · complications
- *   C. Export           CSV of the cohort, with optional de-identification
+ *   C. Associations     cross-sectional associations between Thesis items (tests chosen by variable type)
+ *   D. Export           CSV of the cohort, with optional de-identification
  * =========================================================================== */
 (function (global) {
   'use strict';
@@ -5224,10 +5514,13 @@ A({ id:'oncology', name:'Musculoskeletal Oncology / Orthopedic Oncology', ops:[
   const POST_MODES = [['any', 'Latest post-op or follow-up'], ['post-op', 'Post-op only'], ['follow-up', 'Follow-up only']];
 
   const R = {
-    root: null, tab: 'cohort', D: null, meta: null,
-    F: { sys: '', grades: new Set(), dxs: new Set(), procs: new Set(), impls: new Set(), ages: new Set(), sexes: new Set(), groups: new Set(), follow: '' },
+    root: null, tab: 'cohort', D: null, meta: null, vars: [],
+    F: { sys: '', grades: new Set(), dxs: new Set(), procs: new Set(), impls: new Set(), ages: new Set(), sexes: new Set(), groups: new Set(), follow: '', items: {} },
     postMode: 'any', ds: 'research', deid: true, keyFile: false,
+    A: { x: 'group', y: 'relExt', ordAsCat: false, g: 'group', nonparam: false },   // Associations tab choices
+    openItems: new Set(),
   };
+  const MISSING = '(not recorded)';
 
   /* ================================ cohort logic ================================ */
   const norm = (s) => String(s || '').trim().toLowerCase();
@@ -5246,11 +5539,20 @@ A({ id:'oncology', name:'Musculoskeletal Oncology / Orthopedic Oncology', ops:[
     if (F.sexes.size && !F.sexes.has(m.sex)) return false;
     if (F.groups.size && !(p.subgroups || []).some(g => F.groups.has(g))) return false;
     if (F.follow && !(m.followupMonths !== null && m.followupMonths > Number(F.follow))) return false;
+    for (const v of R.vars) {                                   // Thesis / study items
+      const f = F.items[v.key]; if (!f) continue;
+      const x = v.get(p);
+      if (v.kind === 'num') {
+        if (f.min == null && f.max == null) continue;
+        if (x == null || (f.min != null && x < f.min) || (f.max != null && x > f.max)) return false;
+      } else if (f.sel && f.sel.size && !f.sel.has(x == null ? MISSING : String(x))) return false;
+    }
     return true;
   }
+  const itemActive = (f) => !!f && ((f.sel && f.sel.size > 0) || f.min != null || f.max != null);
   const cohort = () => R.D.patients.filter(matches);
-  const filtersActive = () => { const F = R.F; return !!(F.sys || F.dxs.size || F.procs.size || F.impls.size || F.ages.size || F.sexes.size || F.groups.size || F.follow); };
-  function resetFilters() { R.F = { sys: '', grades: new Set(), dxs: new Set(), procs: new Set(), impls: new Set(), ages: new Set(), sexes: new Set(), groups: new Set(), follow: '' }; }
+  const filtersActive = () => { const F = R.F; return !!(F.sys || F.dxs.size || F.procs.size || F.impls.size || F.ages.size || F.sexes.size || F.groups.size || F.follow || Object.values(F.items).some(itemActive)); };
+  function resetFilters() { R.F = { sys: '', grades: new Set(), dxs: new Set(), procs: new Set(), impls: new Set(), ages: new Set(), sexes: new Set(), groups: new Set(), follow: '', items: {} }; }
   const cohortData = () => Exporter.subset(R.D, cohort().map(p => p.id));
 
   /* ================================ stats helpers ================================ */
@@ -5310,6 +5612,7 @@ A({ id:'oncology', name:'Musculoskeletal Oncology / Orthopedic Oncology', ops:[
     R.root = root;
     R.D = await Exporter.load();
     R.meta = Exporter.patientMeta(R.D);
+    R.vars = Thesis.variables();
     render();
   }
 
@@ -5319,9 +5622,9 @@ A({ id:'oncology', name:'Musculoskeletal Oncology / Orthopedic Oncology', ops:[
       h('div', {}, h('span', { class: 'cohort-count' }, String(hit)), ` of ${N} patient${N === 1 ? '' : 's'} match this study cohort`,
         filtersActive() ? null : h('span', { class: 'muted small' }, ' (no filters applied)')),
       filtersActive() ? h('button', { class: 'btn btn-sm', type: 'button', onclick: () => { resetFilters(); render(); } }, 'Reset filters') : null);
-    const tabs = h('div', { class: 'subtabs', role: 'tablist' }, [['cohort', 'A · Cohort builder'], ['analytics', 'B · Analytics'], ['export', 'C · Export']].map(([id, label]) =>
+    const tabs = h('div', { class: 'subtabs', role: 'tablist' }, [['cohort', 'A · Cohort builder'], ['analytics', 'B · Analytics'], ['assoc', 'C · Associations'], ['export', 'D · Export']].map(([id, label]) =>
       h('button', { type: 'button', role: 'tab', 'aria-selected': String(R.tab === id), onclick: () => { R.tab = id; render(); } }, label)));
-    const body = R.tab === 'cohort' ? cohortTab() : R.tab === 'analytics' ? analyticsTab() : exportTab();
+    const body = R.tab === 'cohort' ? cohortTab() : R.tab === 'analytics' ? analyticsTab() : R.tab === 'assoc' ? assocTab() : exportTab();
     R.root.replaceChildren(bar, tabs, body);
     if (R.tab === 'export') refreshExport();
   }
@@ -5379,7 +5682,143 @@ A({ id:'oncology', name:'Musculoskeletal Oncology / Orthopedic Oncology', ops:[
           h('span', {}, p.name, h('span', { class: 'sub' }, [`MRN ${p.mrn}`, m.age != null ? `${m.age} y` : null, m.procedure || null, m.followupMonths != null ? `${fx(m.followupMonths, 1)} mo follow-up` : null].filter(Boolean).join(' · '))));
       })) : h('p', { class: 'muted' }, 'No patients match the current filters.'));
 
-    return h('div', {}, dxCard, classCard, procCard, implCard, ageCard, fuCard, moreCard, listCard);
+    return h('div', {}, dxCard, classCard, procCard, implCard, ageCard, fuCard, moreCard, thesisItemsCard(), listCard);
+  }
+
+  /* ------------------------------------------- A2. Thesis items as inclusion criteria */
+  function thesisItemsCard() {
+    const P = R.D.patients, vars = R.vars.filter(v => v.key !== 'age' && v.key !== 'sex');   // age and sex have their own filters above
+    const sections = [...new Set(vars.map(v => v.section))];
+    const itemOf = (key) => R.F.items[key] || (R.F.items[key] = {});
+    const block = (v) => {
+      const f = itemOf(v.key), vals = P.map(p => v.get(p)), have = vals.filter(x => x != null);
+      const title = h('div', { class: 'item-title' }, v.label, h('span', { class: 'muted small' }, `  ${have.length} of ${P.length} recorded`));
+      if (v.kind === 'num') {
+        const lo = have.length ? Math.min(...have) : null, hi = have.length ? Math.max(...have) : null;
+        const num = (key, ph) => h('input', { type: 'number', step: 'any', inputmode: 'decimal', placeholder: ph, 'aria-label': `${v.label} ${ph}`, value: f[key] == null ? '' : f[key], style: 'width:7rem',
+          onchange: e => { const n = parseFloat(e.target.value); f[key] = Number.isFinite(n) ? n : null; render(); } });
+        return h('div', { class: 'field' }, title,
+          h('div', { class: 'chip-row wrap', style: 'align-items:center' }, 'from ', num('min', lo == null ? 'min' : String(lo)), ' to ', num('max', hi == null ? 'max' : String(hi)),
+            have.length ? h('span', { class: 'muted small' }, ` observed ${lo}–${hi}`) : h('span', { class: 'muted small' }, ' no values yet')));
+      }
+      const sel = f.sel || (f.sel = new Set()), cnt = new Map();
+      vals.forEach(x => { const k = x == null ? MISSING : String(x); cnt.set(k, (cnt.get(k) || 0) + 1); });
+      const opts = [...v.options, ...(cnt.has(MISSING) ? [MISSING] : [])];
+      return h('div', { class: 'field' }, title,
+        h('div', { class: 'chip-row wrap' }, opts.map(o => chip(o, sel.has(o), () => toggle(sel, o), cnt.get(o) || 0))));
+    };
+    const cards = sections.map(sec => {
+      const mine = vars.filter(v => v.section === sec), active = mine.filter(v => itemActive(R.F.items[v.key])).length;
+      return h('details', { class: 'card', open: active > 0 || R.openItems.has(sec), ontoggle: e => { e.target.open ? R.openItems.add(sec) : R.openItems.delete(sec); } },
+        h('summary', {}, `${sec === 'Patient' ? 'Patient: BMI and affected side' : 'Thesis · ' + sec}${active ? ` — ${active} filter${active === 1 ? '' : 's'} on` : ''}`),
+        h('div', { style: 'margin-top:.6rem' }, mine.map(block)));
+    });
+    return h('div', {}, h('div', { class: 'card' }, h('h3', {}, 'Study items (Thesis sheet)'),
+      h('p', { class: 'muted small' }, 'Choose which values of each item belong to the study. Tick one or more categories, or type a range for numbers; patients without a value for a filtered item are left out. Leave an item untouched to ignore it. The analytics, associations and export tabs use exactly this cohort.')), ...cards);
+  }
+
+  /* ----------------------------------------------------------- C. associations */
+  const esc = (x) => String(x).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+  const KIND_WORD = { num: 'number', cat: 'categories', ord: 'grade' };
+  const strength = (r) => { const a = Math.abs(r); return a < .1 ? 'negligible' : a < .3 ? 'weak' : a < .5 ? 'moderate' : a < .7 ? 'strong' : 'very strong'; };
+
+  function varSelect(id, label, value, onchange, filter) {
+    const list = R.vars.filter(filter || (() => true)), secs = [...new Set(list.map(v => v.section))];
+    return h('div', { class: 'field' }, h('label', { for: id }, label),
+      h('select', { id, onchange: e => onchange(e.target.value) }, secs.map(sec => h('optgroup', { label: sec === 'Patient' ? 'Patient' : sec },
+        list.filter(v => v.section === sec).map(v => h('option', { value: v.key, selected: v.key === value }, `${v.label} — ${KIND_WORD[v.kind]}`))))));
+  }
+
+  /** inline SVG scatter plot with the least-squares line (numbers only, so nothing from the data is injected as markup) */
+  function scatter(r) {
+    const W = 520, H = 320, m = { l: 52, r: 14, t: 12, b: 44 }, x = r.x, y = r.y;
+    const lo = (a) => Math.min(...a), hi = (a) => Math.max(...a), pad = (a, b) => (b - a) || 1;
+    const x0 = lo(x), x1 = hi(x), y0 = lo(y), y1 = hi(y), sx = (v) => m.l + (v - x0) / pad(x0, x1) * (W - m.l - m.r), sy = (v) => H - m.b - (v - y0) / pad(y0, y1) * (H - m.t - m.b);
+    const mx = Stats.mean(x), my = Stats.mean(y); let sxy = 0, sxx = 0; x.forEach((v, i) => { sxy += (v - mx) * (y[i] - my); sxx += (v - mx) ** 2; });
+    const slope = sxx ? sxy / sxx : 0, icpt = my - slope * mx;
+    const f = (v) => Stats.fx(v, Math.abs(v) >= 100 ? 0 : Math.abs(v) >= 10 ? 1 : 2);
+    const ticks = (a, b, fn, k) => [0, 1, 2, 3, 4].map(i => { const v = a + (b - a) * i / 4; return k(v, f(v)); }).join('');
+    const svg = `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Scatter plot of ${esc(r.Y.label)} against ${esc(r.X.label)}" style="width:100%;max-width:${W}px;height:auto">
+      <rect x="${m.l}" y="${m.t}" width="${W - m.l - m.r}" height="${H - m.t - m.b}" fill="none" stroke="currentColor" stroke-opacity=".25"/>
+      ${ticks(x0, x1, null, (v, t) => `<text x="${sx(v)}" y="${H - m.b + 16}" font-size="11" text-anchor="middle" fill="currentColor">${t}</text>`)}
+      ${ticks(y0, y1, null, (v, t) => `<text x="${m.l - 6}" y="${sy(v) + 4}" font-size="11" text-anchor="end" fill="currentColor">${t}</text>`)}
+      ${x1 > x0 ? `<line x1="${sx(x0)}" y1="${sy(slope * x0 + icpt)}" x2="${sx(x1)}" y2="${sy(slope * x1 + icpt)}" stroke="currentColor" stroke-opacity=".55" stroke-dasharray="5 4"/>` : ''}
+      ${x.map((v, i) => `<circle cx="${sx(v)}" cy="${sy(y[i])}" r="4.5" fill="var(--primary, #0b6e8a)" fill-opacity=".75"/>`).join('')}
+      <text x="${(m.l + W - m.r) / 2}" y="${H - 6}" font-size="12" text-anchor="middle" fill="currentColor">${esc(r.X.label)}</text>
+      <text transform="translate(13 ${(m.t + H - m.b) / 2}) rotate(-90)" font-size="12" text-anchor="middle" fill="currentColor">${esc(r.Y.label)}</text></svg>`;
+    const box = h('div', { class: 'card' }, h('h3', {}, 'Scatter plot'));
+    const holder = h('div', {}); holder.innerHTML = svg; box.append(holder); return box;
+  }
+
+  function compareCards(r) {
+    const pTxt = (p) => p == null ? 'not calculable' : (p < 0.001 ? 'p < 0.001' : 'p = ' + p.toFixed(3));
+    const verdict = (p) => p == null ? '' : p < 0.05 ? 'Statistically significant at the 5% level' : 'Not statistically significant at the 5% level';
+    const caution = h('p', { class: 'muted small' }, 'Cross-sectional data show association, not cause. With small groups treat p-values as exploratory and prefer the exact / rank-based tests.');
+    if (r.type === 'same') return [h('div', { class: 'card' }, h('p', { class: 'notice small' }, 'Choose two different items to compare.'))];
+    if (r.type === 'numnum') {
+      if (r.n < 3) return [h('div', { class: 'card' }, h('p', { class: 'notice small' }, `Only ${r.n} patient${r.n === 1 ? ' has' : 's have'} both values — at least 3 are needed.`))];
+      const pe = r.pearson, sp = r.spearman;
+      let ci = '—'; if (pe.r != null && r.n > 3 && Math.abs(pe.r) < 1) { const z = Math.atanh(pe.r), se = 1 / Math.sqrt(r.n - 3); ci = `${fx(Math.tanh(z - 1.959964 * se), 2)} to ${fx(Math.tanh(z + 1.959964 * se), 2)}`; }
+      const rows = [['Spearman rank correlation (ρ)', String(sp.n), fx(sp.rho, 3), '—', fp(sp.p)], ['Pearson correlation (r)', String(pe.n), fx(pe.r, 3), ci, fp(pe.p)]];
+      const lead = sp.rho == null ? '' : `${r.Y.label} and ${r.X.label} show a ${strength(sp.rho)} ${sp.rho >= 0 ? 'positive' : 'negative'} rank correlation (ρ = ${fx(sp.rho, 2)}, ${pTxt(sp.p)}). ${verdict(sp.p)}.`;
+      return [tableCard(`${r.Y.label} vs ${r.X.label}`, `${lead} Based on ${r.n} patients with both values.`, ['Test', 'n', 'Coefficient', '95% CI', 'p'], rows, ''), scatter(r), caution];
+    }
+    if (r.type === 'catnum') {
+      if (r.groups.length < 2) return [h('div', { class: 'card' }, h('p', { class: 'notice small' }, `Need at least 2 groups of ${r.C.label} with ${r.N.label} recorded (found ${r.groups.length}).`))];
+      const u = r.N.unit && !/\(/.test(r.N.label) ? ` ${r.N.unit}` : '';
+      const grows = r.groups.map(g => [g.name, String(g.d.n), `${fx(g.d.mean, 2)}${g.d.sd == null ? '' : ' ± ' + fx(g.d.sd, 2)}`, `${fx(g.d.median, 2)} [${fx(g.d.q1, 2)}–${fx(g.d.q3, 2)}]`, `${fx(g.d.min, 2)}–${fx(g.d.max, 2)}`]);
+      const cards = [tableCard(`${r.N.label} by ${r.C.label}`, `${r.n} patients with both values.${u ? '' : ''}`, [r.C.label, 'n', 'Mean ± SD', 'Median [IQR]', 'Range'], grows, '')];
+      const trows = [];
+      if (r.welch) {
+        const w = r.welch, diff = w.a.mean - w.b.mean; let ci = '—';
+        if (w.t != null && w.df != null) { const se = Math.sqrt(w.a.sd ** 2 / w.a.n + w.b.sd ** 2 / w.b.n), tc = Stats.tCrit(w.df); ci = `${fx(diff - tc * se, 2)} to ${fx(diff + tc * se, 2)}`; }
+        trows.push(['Welch t-test (difference of means)', w.t == null ? '—' : `t = ${fx(w.t, 2)}, df = ${fx(w.df, 1)}`, `${r.groups[0].name} − ${r.groups[1].name}: ${fx(diff, 2)} (95% CI ${ci})`, fp(w.p)]);
+        trows.push([`Mann–Whitney U (${r.mw.exact ? 'exact' : 'normal approximation'})`, r.mw.u == null ? '—' : `U = ${fx(r.mw.u, 1)}`, 'rank-based, no normality assumption', fp(r.mw.p)]);
+        trows.push(['Effect size (Cohen\'s d)', '—', r.d == null ? '—' : `${fx(r.d, 2)}`, '—']);
+      } else {
+        const a = r.anova, k = r.kruskal;
+        trows.push(['One-way ANOVA', a.F == null ? '—' : `F(${a.df1}, ${a.df2}) = ${fx(a.F, 2)}`, a.eta2 == null ? '—' : `η² = ${fx(a.eta2, 2)}`, fp(a.p)]);
+        trows.push(['Kruskal–Wallis', k.H == null ? '—' : `H(${k.df}) = ${fx(k.H, 2)}`, 'rank-based', fp(k.p)]);
+      }
+      const main = r.welch ? r.mw.p : r.kruskal.p;
+      cards.push(tableCard('Tests', `${verdict(main)} (${r.welch ? 'Mann–Whitney' : 'Kruskal–Wallis'}, ${pTxt(main)}).`, ['Test', 'Statistic', 'Result', 'p'], trows, ''), caution);
+      return cards;
+    }
+    // categorical × categorical
+    const t = r.tab;
+    if (t.rows.length < 2 || t.cols.length < 2) return [h('div', { class: 'card' }, h('p', { class: 'notice small' }, 'Both items need at least two different categories among the recorded patients.'))];
+    const rowTot = t.counts.map(rw => rw.reduce((a, b) => a + b, 0));
+    const trows = t.rows.map((rn, i) => [rn, ...t.counts[i].map((n, j) => `${n} (${rowTot[i] ? fx(100 * n / rowTot[i], 0) : 0}%)`), String(rowTot[i])]);
+    const tests = [];
+    const c = r.chi; tests.push(['Pearson chi-square', c.chi2 == null ? '—' : `χ² = ${fx(c.chi2, 2)}, df = ${c.df}`, c.minExpected == null ? '—' : `smallest expected count ${fx(c.minExpected, 1)}${c.lowCells ? ` · ${c.lowCells} of ${c.cells} cells < 5 (prefer exact test)` : ''}`, fp(c.p)]);
+    if (r.fisher) { const f2 = r.fisher; tests.push(["Fisher's exact test", '—', `Odds ratio ${fx(f2.or, 2)} (95% CI ${fx(f2.ci[0], 2)}–${fx(f2.ci[1], 2)})${f2.corrected ? ' with 0.5 added to each cell' : ''}: odds of "${t.cols[0]}" in "${t.rows[0]}" vs "${t.rows[1]}"`, fp(f2.p)]); }
+    const main = r.fisher ? r.fisher.p : c.p;
+    return [tableCard(`${r.Y.label} by ${r.X.label}`, `Counts with row percentages · ${r.n} patients with both values.`, [r.X.label, ...t.cols, 'Total'], trows, ''),
+      tableCard('Tests', `${verdict(main)} (${r.fisher ? "Fisher's exact" : 'chi-square'}, ${pTxt(main)}).`, ['Test', 'Statistic', 'Details', 'p'], tests, ''), caution];
+  }
+
+  function assocTab() {
+    const D = cohortData(), A = R.A, byKey = (k) => R.vars.find(v => v.key === k) || R.vars[0];
+    if (!D.patients.length) return h('div', { class: 'card placeholder-card' }, h('p', {}, 'The cohort is empty. Adjust the filters in the Cohort builder.'));
+    const X = byKey(A.x), Y = byKey(A.y);
+    const pick = h('div', { class: 'card' }, h('h3', {}, 'Association between two items'),
+      h('p', { class: 'muted small' }, `Uses the ${D.patients.length} patient${D.patients.length === 1 ? '' : 's'} in the current cohort. The test is chosen from the type of the two items; patients missing either value are left out of that comparison.`),
+      varSelect('as-x', 'Item 1 (exposure / group)', A.x, v => { A.x = v; render(); }),
+      varSelect('as-y', 'Item 2 (outcome)', A.y, v => { A.y = v; render(); }),
+      h('label', { class: 'check-row', for: 'as-ord' }, h('input', { id: 'as-ord', type: 'checkbox', checked: A.ordAsCat, onchange: e => { A.ordAsCat = e.target.checked; render(); } }),
+        h('span', {}, 'Treat grades as categories', h('div', { class: 'small muted' }, 'Kellgren-Lawrence, Outerbridge, oedema and menisco-tibial ligament are ordered grades and are compared by rank. Tick to cross-tabulate each grade instead.'))));
+    const res = compareCards(Assoc.compare(X, Y, D.patients, { ordAsCat: A.ordAsCat }));
+
+    const groupVars = R.vars.filter(v => v.kind !== 'num'), G = groupVars.find(v => v.key === A.g) || groupVars[0];
+    const t1 = G ? Assoc.table1(G, R.vars, D.patients, { ordAsCat: A.ordAsCat, nonparam: A.nonparam }) : null;
+    const t1rows = t1 ? t1.rows.map(r => [r.sub ? '   ' + r.label : r.label, ...r.cells, r.test, r.p == null ? '' : fp(r.p) + (r.warn ? ' *' : '')]) : [];
+    const t1card = t1 ? [h('div', { class: 'card' }, h('h3', {}, 'Characteristics by group'),
+      h('p', { class: 'muted small' }, 'One table comparing every item between the groups of the item you choose (for example Study group), with a p-value for each — ready to paste into the thesis.'),
+      varSelect('as-g', 'Group by', G.key, v => { A.g = v; render(); }, v => v.kind !== 'num'),
+      h('label', { class: 'check-row', for: 'as-np' }, h('input', { id: 'as-np', type: 'checkbox', checked: A.nonparam, onchange: e => { A.nonparam = e.target.checked; render(); } }),
+        h('span', {}, 'Use median [IQR] and rank-based tests', h('div', { class: 'small muted' }, 'Recommended for small groups or skewed values. Off: mean ± SD with Welch t-test / ANOVA. Categories always use Fisher\'s exact (2 × 2) or chi-square.')))),
+      tableCard(`Table — by ${G.label}`, '* chi-square with some expected counts under 5: read with caution.', ['', ...t1.groups, 'Test', 'p'], t1rows, 'No data.')] : [];
+    return h('div', {}, pick, ...res, ...t1card);
   }
 
   /* ----------------------------------------------------------- B. analytics */
@@ -5704,7 +6143,7 @@ A({ id:'oncology', name:'Musculoskeletal Oncology / Orthopedic Oncology', ops:[
   'use strict';
   const { h, $, $$, fmtDate, round } = Util;
 
-  const APP_VERSION = '0.16.0-prototype';
+  const APP_VERSION = '0.17.0';
   const DISCLAIMER_VERSION = 1;   // bump to force re-acceptance after a wording change
 
   const App = window.App = { state: { currentPatientId: null, view: 'patients', tab: 'demo' } };
