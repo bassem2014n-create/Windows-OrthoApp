@@ -3610,7 +3610,7 @@ A({ id:'oncology', name:'Musculoskeletal Oncology / Orthopedic Oncology', ops:[
           catch (e) { App.toast('Could not save: ' + (e && e.message || e), 'bad'); }
         } }, 'Download thesis table (CSV)')));
   }
-  global.Thesis = { mount, row, COLS, LABELS, rel, variables, tearApplies, _test: { tearShown } };
+  global.Thesis = { mount, row, COLS, LABELS, rel, variables, tearApplies, FIELDS: ALL, _test: { tearShown } };
 })(window);
 
 </script>
@@ -6195,12 +6195,36 @@ A({ id:'oncology', name:'Musculoskeletal Oncology / Orthopedic Oncology', ops:[
     await global.orthoBridge.deleteJson('request-images.json');
     if (n) App.toast(`Sent ${n} image${n === 1 ? '' : 's'} to Claude (only because Claude asked for them)`);
   }
+  const DEMO = { age: 'num', heightCm: 'num', weightKg: 'num', sex: ['M', 'F', 'O'], affectedSide: ['L', 'R', 'B'] };
+  const DEMO_LABEL = { age: 'Age (years)', heightCm: 'Height (cm)', weightKg: 'Weight (kg)', sex: 'Sex', affectedSide: 'Affected side' };
+  /** keep only fields the thesis sheet really has, with values it accepts */
+  function cleanFields(thesis, demo) {
+    const t = {}, d = {};
+    for (const [k, v] of Object.entries(thesis && typeof thesis === 'object' ? thesis : {})) {
+      if (k === 'notes') { if (typeof v === 'string' && v.length <= 2000 && v) t.notes = v; continue; }
+      const f = Thesis.FIELDS.find(x => x[0] === k); if (!f || v === '' || v == null) continue;
+      if (f[2] === 'num') { if (isFinite(Number(v))) t[k] = String(Number(v)); } else if (f[3].includes(String(v))) t[k] = String(v);
+    }
+    for (const [k, v] of Object.entries(demo && typeof demo === 'object' ? demo : {})) {
+      const rule = DEMO[k]; if (!rule || v === '' || v == null) continue;
+      if (rule === 'num') { if (isFinite(Number(v)) && Number(v) > 0) d[k] = String(Number(v)); } else if (rule.includes(String(v))) d[k] = String(v);
+    }
+    return { t, d };
+  }
+  const fieldLabel = (k) => k === 'notes' ? 'Thesis notes' : (DEMO_LABEL[k] || (Thesis.FIELDS.find(x => x[0] === k) || [k, k])[1]);
   async function loadSuggestions() {
     const t = await global.orthoBridge.readJson('suggestions.json');
     const arr = t && parse(t); if (!Array.isArray(arr)) { pending = []; return; }
     const handled = new Set(await OrthoDB.getSetting('bridgeHandled', []));
     const out = [];
+    const allPts = arr.some(x => x && x.type === 'fields') ? await OrthoDB.getAll('patients') : [];
     for (const s of arr) {
+      if (s && s.type === 'fields' && s.id && !handled.has(s.id)) {
+        const pt = allPts.find(p => (p.mrn || '').toLowerCase() === String(s.mrn || '').toLowerCase());
+        const cl = pt && cleanFields(s.thesis, s.demographics);
+        if (cl && (Object.keys(cl.t).length || Object.keys(cl.d).length)) out.push({ ...s, patientId: pt.id, thesis: cl.t, demographics: cl.d });
+        continue;
+      }
       if (!s || handled.has(s.id) || !NEED[s.type] || !Array.isArray(s.points) || s.points.length !== NEED[s.type]) continue;
       const rec = await OrthoDB.get('images', Number(s.imageId)); if (!rec) continue;
       const pt = await OrthoDB.get('patients', rec.patientId); if (!pt || (pt.mrn || '').toLowerCase() !== String(s.mrn || '').toLowerCase()) continue;
@@ -6233,6 +6257,25 @@ A({ id:'oncology', name:'Musculoskeletal Oncology / Orthopedic Oncology', ops:[
       if (!pending.length) { dlg.close(); dlg.remove(); if (onChange) onChange(); return; }
       const items = [];
       for (const s of pending) {
+        if (s.type === 'fields') {
+          const pt = await OrthoDB.get('patients', s.patientId);
+          const rows = [...Object.entries(s.thesis).map(([k, v]) => [k, v, (pt.thesis || {})[k]]), ...Object.entries(s.demographics).map(([k, v]) => [k, v, (pt.demographics || {})[k]])];
+          const accept = async () => {
+            const c = await OrthoDB.get('patients', s.patientId);
+            c.thesis = Object.assign({}, c.thesis || {}, s.thesis); c.demographics = Object.assign({}, c.demographics || {}, s.demographics); c.updatedAt = Date.now();
+            await OrthoDB.put('patients', c); await markHandled(s.id); App.toast('Data added to ' + c.mrn); draw();
+          };
+          items.push(h('div', { class: 'card', style: 'margin:.6rem 0' },
+            h('div', {}, h('strong', {}, `${pt.mrn} \u2014 thesis data`)),
+            s.note ? h('div', { class: 'small muted' }, s.note) : null,
+            h('table', { style: 'width:100%;font-size:.9rem;margin:.4rem 0' }, h('tbody', {}, rows.map(([k, v, old]) => h('tr', {},
+              h('td', {}, fieldLabel(k)), h('td', { style: 'font-weight:600' }, String(v)),
+              h('td', { class: 'small muted' }, old !== '' && old != null && String(old) !== String(v) ? `replaces ${old}` : (old !== '' && old != null ? 'same' : 'new')))))),
+            h('div', { class: 'modal-actions' },
+              h('button', { class: 'btn', type: 'button', onclick: async () => { await markHandled(s.id); draw(); } }, 'Reject'),
+              h('button', { class: 'btn btn-primary', type: 'button', onclick: accept }, 'Accept and fill in'))));
+          continue;
+        }
         const rec = await OrthoDB.get('images', s.imageId), pt = await OrthoDB.get('patients', s.patientId);
         const m = { id: 0, type: s.type, label: s.label || s.type, points: s.points };
         const cv = h('canvas', { style: 'width:100%;border-radius:8px;background:#000' });
@@ -6251,7 +6294,7 @@ A({ id:'oncology', name:'Musculoskeletal Oncology / Orthopedic Oncology', ops:[
             h('button', { class: 'btn', type: 'button', onclick: async () => { await markHandled(s.id); draw(); } }, 'Reject'),
             h('button', { class: 'btn btn-primary', type: 'button', onclick: accept }, 'Accept (you can still drag the points in Radiology)'))));
       }
-      body.replaceChildren(h('h3', {}, `Claude suggestions (${pending.length})`), h('p', { class: 'muted small' }, 'These are estimates. Nothing is saved to the X-ray until you accept it. Check each line against the image.'), ...items,
+      body.replaceChildren(h('h3', {}, `Claude suggestions (${pending.length})`), h('p', { class: 'muted small' }, 'These are estimates read by Claude. Nothing is saved until you accept it. Check each item against the source image or table.'), ...items,
         h('div', { class: 'modal-actions' }, h('button', { class: 'btn', type: 'button', onclick: () => { dlg.close(); dlg.remove(); if (onChange) onChange(); } }, 'Close')));
     };
     dlg.append(body); document.body.append(dlg); dlg.showModal(); draw();
@@ -6319,7 +6362,7 @@ A({ id:'oncology', name:'Musculoskeletal Oncology / Orthopedic Oncology', ops:[
   'use strict';
   const { h, $, $$, fmtDate, round } = Util;
 
-  const APP_VERSION = '0.18.0';
+  const APP_VERSION = '0.19.0';
   const DISCLAIMER_VERSION = 1;   // bump to force re-acceptance after a wording change
 
   const App = window.App = { state: { currentPatientId: null, view: 'patients', tab: 'demo' } };
