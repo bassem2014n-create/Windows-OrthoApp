@@ -377,6 +377,11 @@ dialog.lab-viewer { max-width: 94vw; width: 640px; border: 1px solid var(--borde
         </div>
         <div class="toolbar">
           <input id="patient-search" type="search" placeholder="Search name or MRN…" aria-label="Search patients" autocomplete="off">
+          <select id="patient-sort" aria-label="Order patients by" style="margin-top:.5rem;width:100%">
+            <option value="mrn">Order: MRN number (1, 2, 3 …)</option>
+            <option value="newest">Order: newest added first</option>
+            <option value="group">Order: thesis group, then MRN</option>
+          </select>
         </div>
         <div id="subgroup-filter" class="chip-row" aria-label="Filter by research subgroup"></div>
         <div id="backup-banner"></div>
@@ -6362,7 +6367,7 @@ A({ id:'oncology', name:'Musculoskeletal Oncology / Orthopedic Oncology', ops:[
   'use strict';
   const { h, $, $$, fmtDate, round } = Util;
 
-  const APP_VERSION = '0.19.0';
+  const APP_VERSION = '0.20.0';
   const DISCLAIMER_VERSION = 1;   // bump to force re-acceptance after a wording change
 
   const App = window.App = { state: { currentPatientId: null, view: 'patients', tab: 'demo' } };
@@ -6491,7 +6496,18 @@ A({ id:'oncology', name:'Musculoskeletal Oncology / Orthopedic Oncology', ops:[
 
   /* -------------------------------------------------------------- patient list */
   const P = {
-    all: [], q: '', subgroup: null,
+    all: [], q: '', subgroup: null, sort: 'mrn',
+    /** ordering for the list: by MRN number (natural order), newest added first, or by thesis group then MRN */
+    comparator() {
+      const mrnKey = (p) => String(p.mrn || '').replace(/\s+/g, '');
+      const byMrn = (a, b) => mrnKey(a).localeCompare(mrnKey(b), undefined, { numeric: true, sensitivity: 'base' }) || a.nameLower.localeCompare(b.nameLower);
+      if (P.sort === 'newest') return (a, b) => ((b.createdAt || 0) - (a.createdAt || 0)) || ((b.id || 0) - (a.id || 0));
+      if (P.sort === 'group') {
+        const rank = (p) => { const g = (p.thesis && p.thesis.group) || ''; return g.startsWith('MMPRT') ? 0 : g.startsWith('MME') ? 1 : g === 'Control' ? 2 : 3; };
+        return (a, b) => (rank(a) - rank(b)) || byMrn(a, b);
+      }
+      return byMrn;
+    },
     async render() {
       P.all = await OrthoDB.getAll('patients');
       renderSubgroupFilter();
@@ -6500,7 +6516,7 @@ A({ id:'oncology', name:'Musculoskeletal Oncology / Orthopedic Oncology', ops:[
       const rows = P.all
         .filter(p => !q || p.nameLower.includes(q) || (p.mrn || '').toLowerCase().includes(q))
         .filter(p => !P.subgroup || (p.subgroups || []).includes(P.subgroup))
-        .sort((a, b) => a.nameLower.localeCompare(b.nameLower));
+        .sort(P.comparator());
       const list = $('#patient-list');
       list.replaceChildren();
       if (!rows.length) {
@@ -6761,6 +6777,7 @@ A({ id:'oncology', name:'Musculoskeletal Oncology / Orthopedic Oncology', ops:[
     $('#patient-form').addEventListener('submit', P.create);
     $('#pt-cancel').addEventListener('click', () => $('#patient-dialog').close());
     $('#patient-search').addEventListener('input', e => { P.q = e.target.value; P.render(); });
+    $('#patient-sort').addEventListener('change', e => { P.sort = e.target.value; P.render(); });
     $('#btn-review-disclaimer').addEventListener('click', () => App.showDisclaimer({ mandatory: false }));
     $$('.file-tabs button').forEach(b => b.addEventListener('click', () => selectTab(b.dataset.tab)));
     Clinical.setupVisitDialog();
