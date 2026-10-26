@@ -279,6 +279,18 @@ textarea { resize: vertical; }
 .rad-stage { position: relative; height: min(68vh, 620px); min-height: 320px; background: #000; border-radius: 12px; overflow: hidden; touch-action: none; margin-bottom: .6rem; }
 .rad-canvas { display: block; touch-action: none; cursor: crosshair; user-select: none; -webkit-user-select: none; }
 .loupe { position: absolute; display: none; border-radius: 50%; border: 3px solid #fff; box-shadow: 0 4px 18px rgba(0,0,0,.6); pointer-events: none; }
+.rad-banner { position: absolute; left: 8px; right: 8px; top: 8px; padding: .45rem .7rem; border-radius: 10px; background: rgba(0,0,0,.8); color: #fff; font-size: .88rem; pointer-events: none; border-left: 4px solid #ffd400; }
+.rad-banner:empty { display: none; }
+.rad-banner b { color: #ffd400; }
+.rad-banner .ins { margin-top: .15rem; font-size: .98rem; font-weight: 600; }
+.guide { margin-bottom: .6rem; }
+.guide summary { font-weight: 600; cursor: pointer; margin-bottom: .5rem; }
+.guide select { width: 100%; min-height: 44px; margin-bottom: .5rem; }
+.guide-row { display: flex; gap: .45rem; align-items: center; flex-wrap: wrap; margin: .35rem 0; }
+.guide-result { margin-top: .6rem; }
+.guide-val { font-size: 2rem; font-weight: 700; line-height: 1.15; margin: .2rem 0; }
+.guide-val small { font-size: 1rem; font-weight: 500; opacity: .7; }
+.guide-detail { font-weight: 600; margin-bottom: .3rem; }
 .rad-hint { position: absolute; left: 8px; right: 8px; bottom: 8px; padding: .35rem .6rem; border-radius: 8px; background: rgba(0,0,0,.65); color: #fff; font-size: .78rem; pointer-events: none; }
 .adj { margin: .6rem 0 0; padding: .6rem .9rem; }
 .adj summary { cursor: pointer; font-weight: 600; min-height: 36px; display: flex; align-items: center; }
@@ -3619,6 +3631,8 @@ A({ id:'oncology', name:'Musculoskeletal Oncology / Orthopedic Oncology', ops:[
 })(window);
 
 </script>
+  <script src="guided-geometry.js"></script>
+  <script src="measurement-templates.js"></script>
   <script>
 /* ===========================================================================
  * Radiology & Measurement — lives in the patient file › Radiology tab.
@@ -3652,11 +3666,19 @@ A({ id:'oncology', name:'Musculoskeletal Oncology / Orthopedic Oncology', ops:[
 
   const TOOLS = {
     pan:   { label: 'Pan / zoom', short: 'Pan', need: 0 },
+    guided: { label: 'Guided', short: 'Guided', need: 0 },
     dist:  { label: 'Distance', short: 'Distance', need: 2, hints: ['Place the first point', 'Place the second point'] },
     angle: { label: 'Angle (3 pts)', short: 'Angle', need: 3, hints: ['Place the end of the first arm', 'Place the vertex (corner)', 'Place the end of the second arm'] },
     cobb:  { label: 'Cobb / 2 lines', short: 'Cobb', need: 4, hints: ['Line 1: first point', 'Line 1: second point', 'Line 2: first point', 'Line 2: second point'] },
     calib: { label: 'Calibrate', short: 'Calibration', need: 2, hints: ['Calibration object: one end', 'Calibration object: other end'] },
   };
+  /* Guided measurements: geometry engine (guided-geometry.js) + template library (measurement-templates.js).
+     If either file is missing the guided mode simply hides itself. */
+  const GG = global.GuidedGeometry, MT = global.MeasurementTemplates, GUIDED = !!(GG && MT);
+  if (!GUIDED) delete TOOLS.guided;
+  const tplOf = (m) => (GUIDED && m && m.type === 'guided') ? MT.byId(m.tpl) : null;
+  const needOf = (m) => m.type === 'guided' ? (tplOf(m) ? tplOf(m).points.length : 99) : TOOLS[m.type].need;
+  const evalGuided = (m, cal) => { const t = tplOf(m); return t ? GG.evaluate(t, m.points, { calibration: cal, side: m.side, prims: { dist, angleAt, lineAngle } }) : null; };
   const COLORS = ['#ffd400', '#00e0a4', '#ff6b6b', '#4db8ff', '#ff9f43', '#c58bff'];
   const PRESETS = ['Cobb angle', 'Meniscal extrusion', 'Medial joint space width', 'Hip-knee-ankle (HKA) angle', 'mLDFA', 'MPTA', 'Neck-shaft angle', 'Lateral centre-edge angle', 'Tibial slope', 'Limb length'];
 
@@ -3668,6 +3690,7 @@ A({ id:'oncology', name:'Musculoskeletal Oncology / Orthopedic Oncology', ops:[
     }
     if (m.type === 'angle') { const a = angleAt(p[0], p[1], p[2]); return { num: a, text: a == null ? '—' : `${round(a, 1)}°` }; }
     if (m.type === 'cobb') { const a = lineAngle(p[0], p[1], p[2], p[3]); return { num: a, text: `${round(a, 1)}°` }; }
+    if (m.type === 'guided') { const r = evalGuided(m, cal); if (!r) return { num: null, text: '' }; return r.ok ? { num: r.value, text: r.text } : { num: null, text: r.uncalibrated ? 'needs calibration' : '—' }; }
     return { num: null, text: '' };
   }
 
@@ -3679,6 +3702,7 @@ A({ id:'oncology', name:'Musculoskeletal Oncology / Orthopedic Oncology', ops:[
     adj: { b: 100, c: 100, inv: false },
     canvas: null, loupe: null, W: 0, H: 0, dpr: 1, ro: null, timer: null, dirty: false,
     pendingUpload: null, editingId: null, calibTmp: null,
+    guide: { viewId: '', tplId: null, side: null, armed: false }, showId: null, resumeGuided: false,
   };
 
   /* =============================== persistence =============================== */
@@ -3745,7 +3769,8 @@ A({ id:'oncology', name:'Musculoskeletal Oncology / Orthopedic Oncology', ops:[
     if (S.cur) {
       const pts = S.cur.points.slice();
       if (S.drag && S.drag.kind === 'new') pts.push(S.drag.pt);
-      drawMeasurement(ctx, { type: S.cur.type, points: pts }, '#ffffff', pts.length === TOOLS[S.cur.type].need, cal);
+      const full = { ...S.cur, points: pts };
+      drawMeasurement(ctx, full, '#ffffff', pts.length === needOf(full), cal);
     }
   }
 
@@ -3757,22 +3782,42 @@ A({ id:'oncology', name:'Musculoskeletal Oncology / Orthopedic Oncology', ops:[
     if (m.type === 'dist' || m.type === 'calib') seg(P[0], P[1], m.type === 'calib');
     else if (m.type === 'angle') { seg(P[0], P[1]); seg(P[1], P[2]); }
     else if (m.type === 'cobb') { seg(P[0], P[1]); seg(P[2], P[3]); if (P.length === 4) seg({ x: (P[0].x + P[1].x) / 2, y: (P[0].y + P[1].y) / 2 }, { x: (P[2].x + P[3].x) / 2, y: (P[2].y + P[3].y) / 2 }, true); }
-    P.forEach(p => {
+    else if (m.type === 'guided') drawGuided(ctx, m, map || toScr, seg, small);
+    P.forEach((p, i) => {
       ctx.beginPath(); ctx.arc(p.x, p.y, small ? 3.5 : 6, 0, Math.PI * 2); ctx.fillStyle = 'rgba(0,0,0,.45)'; ctx.fill();
       ctx.lineWidth = small ? 1.5 : 2; ctx.strokeStyle = color; ctx.stroke();
       if (!small) { ctx.beginPath(); ctx.arc(p.x, p.y, 1.6, 0, Math.PI * 2); ctx.fillStyle = color; ctx.fill(); }
+      if (!small && m.type === 'guided') { ctx.fillStyle = color; ctx.textBaseline = 'alphabetic'; ctx.fillText(String(i + 1), p.x + 9, p.y - 8); }
     });
-    if (!small && complete && P.length === TOOLS[m.type].need) {
+    if (!small && complete && P.length === needOf(m)) {
       const v = valueOf(m, cal);
       const text = (m.label ? m.label + ': ' : '') + v.text;
       let at;
       if (m.type === 'angle') at = P[1]; else if (m.type === 'cobb') at = { x: (P[1].x + P[2].x) / 2, y: (P[1].y + P[2].y) / 2 };
+      else if (m.type === 'guided') at = P[P.length - 1];
       else at = { x: (P[0].x + P[1].x) / 2, y: (P[0].y + P[1].y) / 2 };
       const w = ctx.measureText(text).width + 10;
       const x = clamp(at.x + 10, 2, S.W - w - 2), y = clamp(at.y - 22, 2, S.H - 22);
       ctx.fillStyle = 'rgba(0,0,0,.72)'; ctx.fillRect(x, y, w, 20);
       ctx.fillStyle = color; ctx.textBaseline = 'middle'; ctx.fillText(text, x + 5, y + 10);
     }
+  }
+
+  /** Live guided overlay: lines, circles, axes and perpendiculars from the template's draw plan (image coords → map). */
+  function drawGuided(ctx, m, map, seg, small) {
+    const tp = tplOf(m); if (!tp) return;
+    const o = map({ x: 0, y: 0 }), u = map({ x: 1, y: 0 }), k = Math.hypot(u.x - o.x, u.y - o.y);   // screen px per image px
+    GG.plan(tp, m.points).forEach((e) => {
+      if (e.k === 'seg') seg(map(e.a), map(e.b), e.style === 'dashed');
+      else if (e.k === 'line') {
+        const dx = e.b.x - e.a.x, dy = e.b.y - e.a.y, f = 0.6;
+        seg(map(e.a), map(e.b), e.style === 'dashed');
+        ctx.save(); ctx.globalAlpha = 0.55;                                       // extension of the line beyond its two points
+        seg(map({ x: e.a.x - dx * f, y: e.a.y - dy * f }), map(e.a), true); seg(map(e.b), map({ x: e.b.x + dx * f, y: e.b.y + dy * f }), true);
+        ctx.restore();
+      } else if (e.k === 'circle') { const c = map(e.c); ctx.beginPath(); ctx.arc(c.x, c.y, e.r * k, 0, Math.PI * 2); ctx.stroke(); }
+      else if (e.k === 'cross') { const c = map(e.p), r = small ? 4 : 7; seg({ x: c.x - r, y: c.y }, { x: c.x + r, y: c.y }); seg({ x: c.x, y: c.y - r }, { x: c.x, y: c.y + r }); }
+    });
   }
 
   /* ----------------------------------------------------------- magnifier loupe */
@@ -3801,7 +3846,7 @@ A({ id:'oncology', name:'Musculoskeletal Oncology / Orthopedic Oncology', ops:[
     if (S.cur) {
       const pts = S.cur.points.slice();
       if (S.drag && S.drag.kind === 'new') pts.push(S.drag.pt);
-      drawMeasurement(ctx, { type: S.cur.type, points: pts }, '#ffffff', false, cal, map, true);
+      drawMeasurement(ctx, { ...S.cur, points: pts }, '#ffffff', false, cal, map, true);
     }
     ctx.strokeStyle = 'rgba(255,60,60,.95)'; ctx.lineWidth = 1;
     ctx.beginPath(); ctx.moveTo(LOUPE / 2, 6); ctx.lineTo(LOUPE / 2, LOUPE / 2 - 6); ctx.moveTo(LOUPE / 2, LOUPE / 2 + 6); ctx.lineTo(LOUPE / 2, LOUPE - 6);
@@ -3840,13 +3885,19 @@ A({ id:'oncology', name:'Musculoskeletal Oncology / Orthopedic Oncology', ops:[
     if (S.ptrs.size > 2 || S.pinch) return;
     const p = posOf(e);
     if (S.tool === 'pan') { S.drag = { kind: 'pan', start: p, v0: { ...S.view } }; return; }
-    const hit = hitTest(p);
+    // while a guided measurement is being placed, taps always add the next point (some templates reuse the same
+    // spot for two points); use “Undo point” to redo one. Once it is finished, its points can be dragged again.
+    const gReady = S.tool === 'guided' && guidedReady();
+    const hit = gReady ? null : hitTest(p);
     if (hit) {
       const ip = toImg(p.x, p.y);
       S.drag = { kind: 'move', m: hit.m, i: hit.i, isCur: hit.isCur, off: { x: hit.m.points[hit.i].x - ip.x, y: hit.m.points[hit.i].y - ip.y } };
       showLoupe(hit.m.points[hit.i], toScr(hit.m.points[hit.i]));
+      if (hit.m.type === 'guided' && !hit.isCur) { S.showId = hit.m.id; renderResult(); }
+    } else if (S.tool === 'guided' && !gReady) {
+      S.drag = { kind: 'pan', start: p, v0: { ...S.view } }; return;           // nothing to place yet → drag pans the image
     } else {
-      if (!S.cur) S.cur = { type: S.tool, points: [] };
+      if (!S.cur) S.cur = S.tool === 'guided' ? { type: 'guided', tpl: S.guide.tplId, side: (MT.byId(S.guide.tplId) || {}).needsSide ? S.guide.side : null, points: [] } : { type: S.tool, points: [] };
       const ip = clampImg(toImg(p.x, p.y));
       S.drag = { kind: 'new', pt: ip };
       showLoupe(ip, p);
@@ -3876,6 +3927,7 @@ A({ id:'oncology', name:'Musculoskeletal Oncology / Orthopedic Oncology', ops:[
       const ip = toImg(p.x, p.y);
       const np = clampImg({ x: ip.x + S.drag.off.x, y: ip.y + S.drag.off.y });
       S.drag.m.points[S.drag.i] = np; draw(); showLoupe(np, toScr(np));
+      if (S.drag.m.type === 'guided' && !S.drag.isCur) renderResult();         // live recalculation while a placed point is dragged
     }
   }
 
@@ -3887,10 +3939,10 @@ A({ id:'oncology', name:'Musculoskeletal Oncology / Orthopedic Oncology', ops:[
     if (!d) return;
     if (d.kind === 'new') {
       S.cur.points.push(d.pt);
-      if (S.cur.points.length >= TOOLS[S.cur.type].need) finishMeasurement();
+      if (S.cur.points.length >= needOf(S.cur)) finishMeasurement();
     } else if (d.kind === 'move' && !d.isCur) {
       if (d.m.type === 'calib') return;
-      queueSave(); renderList();
+      queueSave(); renderList(); renderResult();
     }
     draw(); renderHint();
   }
@@ -3914,6 +3966,15 @@ A({ id:'oncology', name:'Musculoskeletal Oncology / Orthopedic Oncology', ops:[
       $('#calib-dialog').showModal(); $('#calib-mm').focus();
       return;
     }
+    if (c.type === 'guided') {
+      const tp = MT.byId(c.tpl), same = (S.rec.measurements || []).filter(m => m.type === 'guided' && m.tpl === c.tpl).length;
+      const rec = { id: Date.now(), type: 'guided', tpl: c.tpl, label: same ? `${tp.name} ${same + 1}` : tp.name, points: c.points };
+      if (tp.needsSide && c.side) rec.side = c.side;
+      S.rec.measurements = S.rec.measurements || []; S.rec.measurements.push(rec);
+      S.showId = rec.id; S.guide.armed = false;
+      queueSave(); renderList(); renderResult();
+      return;
+    }
     const n = (S.rec.measurements || []).filter(m => m.type === c.type).length + 1;
     S.rec.measurements = S.rec.measurements || [];
     S.rec.measurements.push({ id: Date.now(), type: c.type, label: `${TOOLS[c.type].short} ${n}`, points: c.points });
@@ -3930,6 +3991,7 @@ A({ id:'oncology', name:'Musculoskeletal Oncology / Orthopedic Oncology', ops:[
       S.calibTmp = null; $('#calib-dialog').close();
       queueSave(); renderList(); draw(); renderCal();
       App.toast('Calibrated — distances now show in mm');
+      if (S.resumeGuided) { S.resumeGuided = false; setTool('guided'); }
     });
     $('#img-cancel').addEventListener('click', () => { S.pendingUpload = null; S.editingId = null; $('#img-dialog').close(); });
     $('#img-form').addEventListener('submit', async (ev) => {
@@ -3964,6 +4026,7 @@ A({ id:'oncology', name:'Musculoskeletal Oncology / Orthopedic Oncology', ops:[
 
   async function loadBitmap() {
     S.bmp = null; S.cur = null; S.drag = null; S.ptrs.clear(); S.pinch = null;
+    S.guide = { viewId: (S.rec && S.rec.guideView) || '', tplId: null, side: null, armed: false }; S.showId = null; S.resumeGuided = false;
     if (!S.rec) return;
     await new Promise((res) => { const i = new Image(); i.onload = () => { S.bmp = i; res(); }; i.onerror = () => res(); i.src = S.rec.dataUrl; });
   }
@@ -4008,7 +4071,7 @@ A({ id:'oncology', name:'Musculoskeletal Oncology / Orthopedic Oncology', ops:[
 
     S.canvas = h('canvas', { class: 'rad-canvas', 'aria-label': 'Image with measurements' });
     S.loupe = h('canvas', { class: 'loupe', 'aria-hidden': 'true' });
-    const stage = h('div', { class: 'rad-stage' }, S.canvas, S.loupe, h('div', { id: 'rad-hint', class: 'rad-hint' }));
+    const stage = h('div', { class: 'rad-stage' }, S.canvas, h('div', { id: 'rad-banner', class: 'rad-banner', 'aria-live': 'polite' }), S.loupe, h('div', { id: 'rad-hint', class: 'rad-hint' }));
     S.canvas.addEventListener('pointerdown', onDown);
     S.canvas.addEventListener('pointermove', onMove);
     S.canvas.addEventListener('pointerup', onUp);
@@ -4032,7 +4095,7 @@ A({ id:'oncology', name:'Musculoskeletal Oncology / Orthopedic Oncology', ops:[
         h('div', { class: 'visit-bar' }, h('strong', {}, `${S.rec.label} · ${S.rec.timepoint} · ${fmtDate(S.rec.date)}`),
           h('button', { class: 'btn btn-sm', type: 'button', onclick: () => { S.editingId = S.rec.id; openInfoDialog(S.rec); } }, 'Details'),
           h('button', { class: 'btn btn-sm btn-danger', type: 'button', 'aria-label': 'Delete image', onclick: deleteImage }, '🗑')),
-        tools, stage, zoomBar, adj,
+        tools, h('div', { id: 'rad-guide' }), stage, zoomBar, h('div', { id: 'rad-result' }), adj,
         h('h3', { style: 'margin-top:1rem' }, 'Measurements'),
         h('div', { id: 'rad-list' }),
         h('datalist', { id: 'rad-presets' }, PRESETS.map(p => h('option', { value: p })))));
@@ -4040,7 +4103,7 @@ A({ id:'oncology', name:'Musculoskeletal Oncology / Orthopedic Oncology', ops:[
     S.ro = new ResizeObserver(() => resize());
     S.ro.observe(stage);
     requestAnimationFrame(() => { resize(true); });
-    renderList(); renderHint(); renderCal();
+    renderGuide(); renderList(); renderHint(); renderCal();
   }
 
   const adjSlider = (label, key, min, max) => h('div', { class: 'field' }, h('label', {}, `${label}`),
@@ -4062,9 +4125,10 @@ A({ id:'oncology', name:'Musculoskeletal Oncology / Orthopedic Oncology', ops:[
 
   function setTool(id) {
     if (S.cur && S.cur.type !== id) S.cur = null;
+    if (id !== 'calib') S.resumeGuided = false;
     S.tool = id;
     $('.chip-row[aria-label=Tools]', S.root).querySelectorAll('button').forEach((b, i) => b.setAttribute('aria-pressed', String(Object.keys(TOOLS)[i] === id)));
-    draw(); renderHint();
+    draw(); renderHint(); renderGuide();
   }
   function zoomBy(f) {
     const c = { x: S.W / 2, y: S.H / 2 }, ip = toImg(c.x, c.y);
@@ -4074,9 +4138,20 @@ A({ id:'oncology', name:'Musculoskeletal Oncology / Orthopedic Oncology', ops:[
 
   function renderHint() {
     const el = $('#rad-hint'); if (!el) return;
-    const t = TOOLS[S.tool];
+    const t = TOOLS[S.tool], bn = $('#rad-banner');
+    if (bn) bn.replaceChildren();
     if (S.tool === 'pan') el.textContent = 'Drag to move · pinch or scroll to zoom';
-    else { const n = S.cur ? S.cur.points.length : 0; el.textContent = `${t.label}: ${t.hints[Math.min(n, t.need - 1)]} (${Math.min(n + 1, t.need)}/${t.need}) — press, slide to fine-tune, lift to place`; }
+    else if (S.tool === 'guided') {
+      const tp = S.cur ? MT.byId(S.cur.tpl) : (S.guide.tplId ? MT.byId(S.guide.tplId) : null), say = (a, b) => { if (bn) bn.append(a, ...(b ? [h('div', { class: 'ins' }, b)] : [])); };
+      if (!tp) { el.textContent = 'Guided: choose a region / view and a measurement above'; say('Choose a region / view, then a measurement', null); }
+      else if (tp.needsSide && !S.guide.side && !S.cur) { el.textContent = 'Guided: choose Right or Left limb above'; say(h('b', {}, tp.name), 'Choose which limb this is (Right / Left) above to start.'); }
+      else if (!S.cur && !S.guide.armed) { el.textContent = 'Result below · drag any point to recalculate · drag empty space to pan'; say(h('b', {}, '✓ ' + tp.name + ' done'), 'Drag any point to adjust it, or press “Measure again”.'); }
+      else {
+        const n = S.cur ? S.cur.points.length : 0, N = tp.points.length, pt = tp.points[Math.min(n, N - 1)];
+        el.textContent = 'Press, slide to fine-tune with the magnifier, lift to place — the next point follows automatically';
+        say(h('span', {}, h('b', {}, `Point ${n + 1} of ${N}`), ' · ' + tp.name), pt.instruction);
+      }
+    } else { const n = S.cur ? S.cur.points.length : 0; el.textContent = `${t.label}: ${t.hints[Math.min(n, t.need - 1)]} (${Math.min(n + 1, t.need)}/${t.need}) — press, slide to fine-tune, lift to place`; }
   }
   function renderCal() {
     const el = $('#rad-cal'); if (!el) return;
@@ -4084,6 +4159,7 @@ A({ id:'oncology', name:'Musculoskeletal Oncology / Orthopedic Oncology', ops:[
       ? `Calibrated: 1 px = ${round(S.rec.calibration.mmPerPx, 3)} mm `
       : 'Not calibrated — distances shown in pixels. ',
       ...(S.rec.calibration ? [h('a', { href: '#', onclick: (e) => { e.preventDefault(); S.rec.calibration = null; queueSave(); renderCal(); renderList(); draw(); } }, 'clear')] : []));
+    renderGuide(); renderResult();
   }
 
   function renderList() {
@@ -4091,13 +4167,80 @@ A({ id:'oncology', name:'Musculoskeletal Oncology / Orthopedic Oncology', ops:[
     const ms = S.rec.measurements || [];
     if (!ms.length) { box.replaceChildren(h('p', { class: 'muted small' }, 'No measurements yet. Pick a tool above and tap the image.')); return; }
     box.replaceChildren(...ms.map((m, i) => {
-      const v = valueOf(m, S.rec.calibration);
-      return h('div', { class: 'meas-row' },
+      const v = valueOf(m, S.rec.calibration), gd = m.type === 'guided';
+      return h('div', gd ? { class: 'meas-row', style: 'grid-template-columns:14px 1fr auto auto auto' } : { class: 'meas-row' },
         h('span', { class: 'dot', style: `background:${COLORS[i % COLORS.length]}` }),
         h('input', { value: m.label, list: 'rad-presets', maxlength: 60, 'aria-label': 'Measurement name', oninput: e => { m.label = e.target.value; queueSave(); draw(); } }),
         h('strong', { class: 'meas-val' }, v.text),
-        h('button', { class: 'btn btn-sm btn-ghost', type: 'button', 'aria-label': 'Delete measurement', onclick: () => { S.rec.measurements.splice(i, 1); queueSave(); renderList(); draw(); } }, '🗑'));
+        gd ? h('button', { class: 'btn btn-sm btn-ghost', type: 'button', 'aria-label': 'Show result and interpretation', onclick: () => { S.showId = m.id; renderResult(); } }, 'ⓘ') : null,
+        h('button', { class: 'btn btn-sm btn-ghost', type: 'button', 'aria-label': 'Delete measurement', onclick: () => { S.rec.measurements.splice(i, 1); if (S.showId === m.id) S.showId = null; queueSave(); renderList(); renderResult(); draw(); } }, '🗑'));
     }));
+  }
+
+  /* ============================ guided measurements UI ============================ */
+  const curTplId = () => S.cur ? S.cur.tpl : S.guide.tplId;
+  /** true when a tap on empty image should place the next guided point */
+  function guidedReady() {
+    const tp = curTplId() && GUIDED ? MT.byId(curTplId()) : null;
+    if (!tp) return false;
+    if (!S.cur && !S.guide.armed) return false;
+    if (tp.needsSide && !S.guide.side) { App.toast('Choose Right or Left limb first'); return false; }
+    return true;
+  }
+  async function askCalibrate() {
+    const ok = await App.confirm({ title: 'Calibrate first?', message: 'This measurement is in millimetres. Calibrate the image with an object of known size (ruler, marker or implant) so it shows true mm. Calibrate now?', okLabel: 'Calibrate', danger: false });
+    if (ok) { S.resumeGuided = true; setTool('calib'); }
+  }
+  function pickTemplate(id) {
+    const tp = MT.byId(id); if (!tp) return;
+    S.guide.tplId = id; S.guide.armed = true; S.cur = null; S.showId = null;
+    if (S.tool !== 'guided') setTool('guided'); else { draw(); renderHint(); renderGuide(); }
+    renderResult();
+    if (tp.needsCalibration && !S.rec.calibration) askCalibrate();
+  }
+  function renderGuide() {
+    const box = $('#rad-guide'); if (!box) return;
+    if (!GUIDED) { box.replaceChildren(); return; }
+    const g = S.guide, view = MT.VIEWS.find(v => v.id === g.viewId), list = view ? MT.forView(view.id) : [], tp = g.tplId ? MT.byId(g.tplId) : null;
+    const sel = h('select', { id: 'guide-view', 'aria-label': 'Region and view', onchange: (e) => {
+      g.viewId = e.target.value; g.tplId = null; g.armed = false; S.cur = null; S.showId = null;
+      S.rec.guideView = g.viewId; queueSave(); renderGuide(); renderResult(); draw(); renderHint();
+    } }, h('option', { value: '' }, 'Choose region & view…'), ...MT.VIEWS.map(v => h('option', { value: v.id, selected: v.id === g.viewId }, v.label)));
+    const sideRow = tp && tp.needsSide ? h('div', { class: 'guide-row', role: 'group', 'aria-label': 'Limb side' },
+      h('span', { class: 'small' }, 'Limb:'),
+      ...['R', 'L'].map(sd => h('button', { type: 'button', class: 'chip', 'aria-pressed': String(g.side === sd), onclick: () => { g.side = sd; if (S.cur) S.cur.side = sd; renderGuide(); renderHint(); } }, sd === 'R' ? 'Right' : 'Left')),
+      h('span', { class: 'muted small' }, 'Standard film: patient’s right on the left of the image.')) : null;
+    const calRow = tp && tp.needsCalibration ? h('div', { class: 'guide-row' },
+      h('span', { class: 'small' }, S.rec.calibration ? 'Calibrated ✓' : 'Needs calibration (result is in mm)'),
+      S.rec.calibration ? null : h('button', { class: 'btn btn-sm', type: 'button', onclick: askCalibrate }, 'Calibrate now')) : null;
+    box.replaceChildren(h('details', { class: 'card guide', open: S.guideOpen !== false, ontoggle: (e) => { S.guideOpen = e.target.open; } },
+      h('summary', {}, 'Guided measurements'),
+      sel,
+      view ? h('div', { class: 'chip-row wrap', role: 'group', 'aria-label': 'Measurements' }, list.map(t => h('button', { type: 'button', class: 'chip', 'aria-pressed': String(g.tplId === t.id), onclick: () => pickTemplate(t.id) }, t.name))) : h('p', { class: 'muted small' }, 'Pick the region and view of this image to see its common measurements. Each one walks you through the points step by step.'),
+      tp ? h('p', { class: 'muted small' }, `${tp.name}: ${tp.points.length} points · result in ${tp.unit === 'degrees' ? 'degrees' : tp.unit === 'mm' ? 'millimetres' : 'ratio'}`) : null,
+      sideRow, calRow));
+  }
+  const STATUS = { low: 'Outside normal range', high: 'Outside normal range', normal: 'Within normal range' };
+  function renderResult() {
+    const box = $('#rad-result'); if (!box) return;
+    const m = GUIDED && S.showId != null && S.rec ? (S.rec.measurements || []).find(x => x.id === S.showId && x.type === 'guided') : null;
+    const tp = m && MT.byId(m.tpl);
+    if (!m || !tp) { box.replaceChildren(); return; }
+    const r = evalGuided(m, S.rec.calibration);
+    const sideBtns = tp.needsSide ? h('div', { class: 'guide-row', role: 'group', 'aria-label': 'Limb side' }, h('span', { class: 'small' }, 'Limb:'),
+      ...['R', 'L'].map(sd => h('button', { type: 'button', class: 'chip', 'aria-pressed': String(m.side === sd), onclick: () => { m.side = sd; queueSave(); renderResult(); renderList(); draw(); } }, sd === 'R' ? 'Right' : 'Left'))) : null;
+    box.replaceChildren(h('div', { class: 'card guide-result' },
+      h('div', { class: 'visit-bar' }, h('strong', {}, tp.name + (m.side ? ' · ' + (m.side === 'R' ? 'Right' : 'Left') : '')),
+        h('button', { class: 'btn btn-sm', type: 'button', onclick: () => { S.guide.tplId = m.tpl; if (m.side) S.guide.side = m.side; S.guide.armed = true; S.cur = null; S.showId = null; setTool('guided'); renderResult(); } }, 'Measure again'),
+        h('button', { class: 'btn btn-sm btn-ghost', type: 'button', 'aria-label': 'Close result', onclick: () => { S.showId = null; renderResult(); } }, '✕')),
+      r && r.ok ? h('div', { class: 'guide-val' }, r.text.replace(/ ratio$/, ''), r.text.endsWith(' ratio') ? h('small', {}, ' ratio') : null) : null,
+      r && r.detail ? h('div', { class: 'guide-detail' }, r.detail) : null,
+      r && r.uncalibrated ? h('div', { class: 'notice notice-warn small' }, 'This image is not calibrated, so millimetres cannot be shown. ', h('button', { class: 'btn btn-sm', type: 'button', onclick: askCalibrate }, 'Calibrate now')) : null,
+      r && r.ok && r.normal ? h('p', { class: 'small' }, h('strong', {}, 'Normal: '), r.normal.text) : null,
+      r && r.ok && r.status ? h('div', { class: 'notice small ' + (r.status === 'normal' ? 'notice-ok' : 'notice-warn') }, STATUS[r.status] + (r.interpretation ? ' → ' + r.interpretation : '')) : null,
+      r && r.ok && !r.status && r.interpretation ? h('div', { class: 'notice small' }, r.interpretation) : null,
+      sideBtns,
+      h('p', { class: 'muted small' }, 'Drag any placed point to refine — the result updates live. Reference ranges are typical adult values; interpret in clinical context.')));
   }
 
   async function deleteImage() {
@@ -4292,14 +4435,14 @@ A({ id:'oncology', name:'Musculoskeletal Oncology / Orthopedic Oncology', ops:[
     };
 
     // measurement comparison by label (+unit)
-    const unitOf = (t) => /mm$/.test(t) ? 'mm' : /°$/.test(t) ? '°' : 'px';
+    const unitOf = (t) => /mm$/.test(t) ? 'mm' : /°$/.test(t) ? '°' : /ratio$/.test(t) ? 'ratio' : 'px';
     const mm = (rec) => { const o = new Map(); (rec.measurements || []).filter(m => m.type !== 'calib').forEach(m => { const v = Radiology.calc.valueOf(m, rec.calibration); const k = `${m.label.trim().toLowerCase()}|${unitOf(v.text)}`; if (!o.has(k)) o.set(k, { label: m.label.trim(), v }); }); return o; };
     const a = mm(L), b = mm(R), keys = [...new Set([...a.keys(), ...b.keys()])];
     const table = keys.length ? h('div', { class: 'table-wrap' }, h('table', { class: 'cmp' },
       h('thead', {}, h('tr', {}, h('th', {}, 'Measurement'), h('th', {}, tpLabel(L.timepoint)), h('th', {}, tpLabel(R.timepoint)), h('th', {}, 'Δ'))),
       h('tbody', {}, keys.map(k => {
         const x = a.get(k), y = b.get(k);
-        const d = x && y && x.v.num != null && y.v.num != null ? round(y.v.num - x.v.num, 1) : null;
+        const d = x && y && x.v.num != null && y.v.num != null ? round(y.v.num - x.v.num, k.endsWith('|ratio') ? 2 : 1) : null;
         return h('tr', {}, h('th', { scope: 'row' }, (x || y).label), h('td', {}, x ? x.v.text : '—'), h('td', {}, y ? y.v.text : '—'),
           h('td', { class: 'delta ' + (d > 0 ? 'up' : d < 0 ? 'down' : '') }, d == null ? '' : (d > 0 ? '+' : '') + d + ' ' + unitOf(k.split('|')[1] === 'px' ? 'px' : (x || y).v.text)));
       })))) : h('p', { class: 'muted small' }, 'No saved measurements on these two images yet (add them in the Radiology tab).');
@@ -4972,7 +5115,7 @@ A({ id:'oncology', name:'Musculoskeletal Oncology / Orthopedic Oncology', ops:[
   const toCSV = (cols, rows, labels) => [cols.map(c => cell(labels && labels[c] || c)).join(','), ...rows.map(r => cols.map(c => cell(r[c])).join(','))].join('\r\n');
   const slug = (s) => String(s).toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_|_$/g, '');
   const latest = (arr) => arr.slice().sort((a, b) => (a.assessedOn || '').localeCompare(b.assessedOn || '') || a.createdAt - b.createdAt).pop();
-  const unitOf = (text) => /mm$/.test(text) ? 'mm' : /°$/.test(text) ? 'deg' : /px$/.test(text) ? 'px' : '';
+  const unitOf = (text) => /mm$/.test(text) ? 'mm' : /°$/.test(text) ? 'deg' : /ratio$/.test(text) ? 'ratio' : /px$/.test(text) ? 'px' : '';
   const DAY = 86400000, MONTH = 30.4375 * DAY;
   const months = (from, to) => { if (!from || !to) return null; const d = (new Date(to) - new Date(from)) / MONTH; return Number.isFinite(d) ? round(d, 1) : null; };
 
@@ -5137,7 +5280,7 @@ A({ id:'oncology', name:'Musculoskeletal Oncology / Orthopedic Oncology', ops:[
         (img.measurements || []).forEach(m => {
           const v = Radiology.calc.valueOf(m, img.calibration);
           rows.push({ ...identity(p), subgroups: (p.subgroups || []).join(';'), image_label: img.label, stage: img.timepoint, image_date: img.date, months_since_surgery: months(p.surgeryDate, img.date),
-            measurement: m.label, type: m.type, value: v.num == null ? '' : round(v.num, m.type === 'dist' && img.calibration ? 2 : 1), unit: unitOf(v.text),
+            measurement: m.label, type: m.type, value: v.num == null ? '' : round(v.num, (m.type === 'dist' && img.calibration) || unitOf(v.text) === 'ratio' ? 2 : 1), unit: unitOf(v.text),
             calibrated: img.calibration ? 'yes' : 'no', mm_per_px: img.calibration ? round(img.calibration.mmPerPx, 5) : '' });
         });
       });
@@ -5178,7 +5321,7 @@ A({ id:'oncology', name:'Musculoskeletal Oncology / Orthopedic Oncology', ops:[
             if (m.type === 'calib') return;
             const v = Radiology.calc.valueOf(m, im.calibration), u = unitOf(v.text), c = `${slug(m.label)}_${u}_${tp}`;
             if (seen.has(c) || v.num == null) return; seen.add(c);
-            row[c] = round(v.num, u === 'px' ? 0 : 1); extra.add(c); numeric.add(c);
+            row[c] = round(v.num, u === 'px' ? 0 : u === 'ratio' ? 2 : 1); extra.add(c); numeric.add(c);
           });
         });
         rows.push(row);
@@ -5595,7 +5738,7 @@ A({ id:'oncology', name:'Musculoskeletal Oncology / Orthopedic Oncology', ops:[
       const pre = newest(['pre-op']) || newest(['baseline']);
       const post = R.postMode === 'any' ? newest(['post-op', 'follow-up']) : newest([R.postMode]);
       if (!pre || !post || pre.id === post.id) return;
-      const vals = (im) => { const o = new Map(); (im.measurements || []).filter(m => m.type !== 'calib').forEach(m => { const v = Radiology.calc.valueOf(m, im.calibration); if (v.num == null) return; const u = /mm$/.test(v.text) ? 'mm' : /°$/.test(v.text) ? '°' : 'px'; const k = `${norm(m.label)}|${u}`; if (!o.has(k)) o.set(k, { label: m.label.trim(), u, n: v.num }); }); return o; };
+      const vals = (im) => { const o = new Map(); (im.measurements || []).filter(m => m.type !== 'calib').forEach(m => { const v = Radiology.calc.valueOf(m, im.calibration); if (v.num == null) return; const u = /mm$/.test(v.text) ? 'mm' : /°$/.test(v.text) ? '°' : /ratio$/.test(v.text) ? 'ratio' : 'px'; const k = `${norm(m.label)}|${u}`; if (!o.has(k)) o.set(k, { label: m.label.trim(), u, n: v.num }); }); return o; };
       const a = vals(pre), b = vals(post);
       a.forEach((x, k) => { const y = b.get(k); if (!y) return; if (!acc.has(k)) acc.set(k, { label: `${x.label} (${x.u})`, pre: [], post: [], px: x.u === 'px' }); acc.get(k).pre.push(x.n); acc.get(k).post.push(y.n); });
     });
@@ -6367,7 +6510,7 @@ A({ id:'oncology', name:'Musculoskeletal Oncology / Orthopedic Oncology', ops:[
   'use strict';
   const { h, $, $$, fmtDate, round } = Util;
 
-  const APP_VERSION = '0.20.0';
+  const APP_VERSION = '0.21.0';
   const DISCLAIMER_VERSION = 1;   // bump to force re-acceptance after a wording change
 
   const App = window.App = { state: { currentPatientId: null, view: 'patients', tab: 'demo' } };
