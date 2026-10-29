@@ -184,10 +184,12 @@
     },
     /** distance p→q measured parallel to an axis (mm); positive when q is further distal */
     distanceAlongAxis(a, env, o) {
-      const pq = getAll(env, a.pts), ax = getAll(env, a.axis), dl = getAll(env, a.distalLine);
+      const pq = getAll(env, a.pts), ax = getAll(env, a.axis), dl = a.distalLine ? getAll(env, a.distalLine) : pq;
       if (!pq || !ax || !dl) return null;
       if (!(o.calibration && o.calibration.mmPerPx)) return { value: null, uncalibrated: true };
-      const mm = distanceAlongAxis(pq[0], pq[1], ax[0], ax[1], midpoint(ax[0], ax[1]), midpoint(dl[0], dl[1]));
+      // direction 'axis': positive is the way the axis points (first → second point); default: towards distalLine
+      const mm = a.direction === 'axis' ? distanceAlongAxis(pq[0], pq[1], ax[0], ax[1], ax[0], ax[1])
+        : distanceAlongAxis(pq[0], pq[1], ax[0], ax[1], midpoint(ax[0], ax[1]), midpoint(dl[0], dl[1]));
       return { value: mm * o.calibration.mmPerPx };
     },
     /** line a→b vs the perpendicular of an axis, signed by the distal direction (radial inclination, volar tilt, tibial slope) */
@@ -209,7 +211,8 @@
     hka(a, env, o) {
       const p = getAll(env, [a.hip, a.knee, a.ankle]); if (!p) return null;
       const r = hka(p[0], p[1], p[2], o.side || 'R');
-      return r ? { value: r.angle, dev: r.dev } : null;
+      // output 'deviation': the acute angle between the femoral and tibial mechanical axes (= |180° − HKA|), signed in dev
+      return r ? (a.output === 'deviation' ? { value: Math.abs(r.dev), dev: r.dev } : { value: r.angle, dev: r.dev }) : null;
     },
   };
 

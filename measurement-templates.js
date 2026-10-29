@@ -16,6 +16,8 @@
  *   signed, decimals, detail        formatting extras
  *   needsCalibration, needsSide     the UI asks for calibration / limb side first
  *
+ *   thesis: { field }                 the result is offered to the Thesis sheet field (extMm, widthMm, osteoMm, mtfa, mldfa, mpta, mpts)
+ *
  * Image coordinates: y points DOWN. Directions (varus/valgus, volar/dorsal …) are derived from the anatomy of the
  * points the user taps, not from the image being left or right — except HKA, which needs the limb side.
  * ========================================================================= */
@@ -26,6 +28,7 @@
   'use strict';
 
   const VIEWS = [
+    { id: 'thesis',          region: 'Thesis',   view: 'Measurements',     label: 'Thesis measurements (auto-fill the Thesis sheet)' },
     { id: 'spine-ap',        region: 'Spine',    view: 'AP',               label: 'Spine – AP' },
     { id: 'hip-ap-pelvis',   region: 'Hip',      view: 'AP pelvis',        label: 'Hip – AP pelvis' },
     { id: 'knee-lateral',    region: 'Knee',     view: 'Lateral',          label: 'Knee – Lateral' },
@@ -186,6 +189,7 @@
       ],
       // slope = 90° − angle(plateau line, shaft axis); positive when the plateau falls posteriorly
       compute: { fn: 'tiltFromPerpendicular', line: ['p5', 'p6'], axis: ['m1', 'm2'], distal: 'axis', positive: 'last-distal' },
+      thesis: { field: 'mpts' },
       normal: { min: 5, max: 10, text: '≈ 5–10°' },
       interpret: [
         { if: { lt: 0 }, text: 'Anterior (reverse) slope' },
@@ -226,7 +230,7 @@
       ],
     },
     {
-      id: 'mldfa', name: 'mLDFA', region: 'Knee', view: 'Long-leg AP', unit: 'degrees',
+      id: 'mldfa', name: 'mLDFA', region: 'Knee', view: 'Long-leg AP', unit: 'degrees', thesis: { field: 'mldfa' },
       points: [
         ...HEAD(),
         { label: 'Knee centre (femoral)', instruction: 'Tap the centre of the knee at the femoral side (middle of the intercondylar notch).' },
@@ -250,7 +254,7 @@
       ],
     },
     {
-      id: 'mpta', name: 'MPTA', region: 'Knee', view: 'Long-leg AP', unit: 'degrees',
+      id: 'mpta', name: 'MPTA', region: 'Knee', view: 'Long-leg AP', unit: 'degrees', thesis: { field: 'mpta' },
       points: [
         { label: 'Tibial plateau – medial edge', instruction: 'Tap the MEDIAL edge of the tibial plateau.' },
         { label: 'Tibial plateau – lateral edge', instruction: 'Tap the LATERAL edge of the tibial plateau.' },
@@ -407,10 +411,83 @@
         { else: true, text: 'Normal critical shoulder angle' },
       ],
     },
+
+    /* ------------------------------------------------------------ THESIS – measurements that auto-fill the Thesis sheet */
+    {
+      id: 'th-ext', name: 'Medial meniscus extrusion (MRI coronal)', region: 'Thesis', view: 'Measurements', unit: 'mm',
+      needsCalibration: true, signed: true, decimals: 1, thesis: { field: 'extMm' },
+      points: [
+        { label: 'Reference line – lateral end', instruction: 'Tap a point on the LATERAL side of the tibial plateau line (start of the reference line across the joint).' },
+        { label: 'Reference line – medial end', instruction: 'Tap a point on the MEDIAL side of the same line (the line runs lateral → medial).' },
+        { label: 'Tibial plateau – medial margin', instruction: 'Tap the MEDIAL margin of the tibial plateau.' },
+        { label: 'Meniscus – outer border', instruction: 'Tap the outermost (medial) border of the medial meniscus body.' },
+      ],
+      draw: [
+        { op: 'line', a: 'p1', b: 'p2', style: 'dashed' },
+        { op: 'segment', a: 'p3', b: 'p4' },
+      ],
+      // tibial margin → meniscus outer border, measured along the lateral→medial line; positive = beyond the margin
+      compute: { fn: 'distanceAlongAxis', pts: ['p3', 'p4'], axis: ['p1', 'p2'], direction: 'axis' },
+      normal: { min: -Infinity, max: 3, text: '< 3 mm' },
+      interpret: [
+        { if: { gte: 3 }, text: 'Meniscal extrusion (≥ 3 mm)' },
+        { else: true, text: 'No significant extrusion (< 3 mm)' },
+      ],
+    },
+    {
+      id: 'th-width', name: 'Medial meniscus width (MRI coronal)', region: 'Thesis', view: 'Measurements', unit: 'mm',
+      needsCalibration: true, decimals: 1, thesis: { field: 'widthMm' },
+      points: [
+        { label: 'Meniscus – inner border', instruction: 'Tap the INNER (central) tip of the medial meniscus body.' },
+        { label: 'Meniscus – outer border', instruction: 'Tap the OUTER (peripheral) border of the medial meniscus body.' },
+      ],
+      draw: [{ op: 'segment', a: 'p1', b: 'p2' }],
+      compute: { fn: 'distance', pts: ['p1', 'p2'] },
+    },
+    {
+      id: 'th-osteo', name: 'Osteophyte size', region: 'Thesis', view: 'Measurements', unit: 'mm',
+      needsCalibration: true, decimals: 1, thesis: { field: 'osteoMm' },
+      points: [
+        { label: 'Osteophyte – base', instruction: 'Tap the BASE of the osteophyte (where it meets the bone margin).' },
+        { label: 'Osteophyte – tip', instruction: 'Tap the TIP (outermost point) of the osteophyte.' },
+      ],
+      draw: [{ op: 'segment', a: 'p1', b: 'p2' }],
+      compute: { fn: 'distance', pts: ['p1', 'p2'] },
+    },
+    {
+      id: 'mtfa', name: 'mTFA (mechanical tibiofemoral angle)', region: 'Thesis', view: 'Measurements', unit: 'degrees',
+      thesis: { field: 'mtfa' },
+      points: [
+        ...HEAD(),
+        { label: 'Knee centre', instruction: 'Tap the centre of the knee – midway between the tibial spines.' },
+        { label: 'Talar dome – medial edge', instruction: 'Tap the MEDIAL edge of the talar dome (ankle).' },
+        { label: 'Talar dome – lateral edge', instruction: 'Tap the LATERAL edge of the talar dome (ankle).' },
+      ],
+      derived: [
+        { id: 'hc', op: 'circleCenter', of: ['p1', 'p2', 'p3'] },
+        { id: 'ac', op: 'midpoint', of: ['p5', 'p6'] },
+      ],
+      draw: [
+        { op: 'circle', of: 'hc' },
+        { op: 'cross', ref: 'hc' },
+        { op: 'cross', ref: 'ac' },
+        { op: 'segment', a: 'hc', b: 'p4' },
+        { op: 'segment', a: 'p4', b: 'ac' },
+      ],
+      // acute angle between the mechanical femoral axis (hip→knee) and the mechanical tibial axis (knee→ankle)
+      compute: { fn: 'hka', hip: 'hc', knee: 'p4', ankle: 'ac', output: 'deviation' },
+      normal: { min: 0, max: 3, text: '0–3°' },
+      interpret: [
+        { if: { gt: 3 }, text: 'Malaligned mechanical axis (> 3° from neutral)' },
+        { else: true, text: 'Neutral mechanical alignment' },
+      ],
+    },
   ];
 
   const byId = (id) => TEMPLATES.find((t) => t.id === id) || null;
+  const THESIS_ORDER = ['th-ext', 'th-width', 'mldfa', 'mpta', 'mtfa', 'tibial-slope', 'th-osteo'];
   const forView = (viewId) => {
+    if (viewId === 'thesis') return THESIS_ORDER.map(byId).filter(Boolean);
     const v = VIEWS.find((x) => x.id === viewId);
     return v ? TEMPLATES.filter((t) => t.region === v.region && t.view === v.view) : [];
   };

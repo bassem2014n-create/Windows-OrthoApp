@@ -266,7 +266,23 @@ const CAL = { mmPerPx: 0.5 };
     (t.draw || []).forEach((d) => { ['a', 'b', 'of', 'ref', 'through'].forEach((k) => d[k] && refsOk(d[k])); d.to && refsOk(d.to); });
     n += 6;
   });
-  assert.strictEqual(T.TEMPLATES.length, 15); n++;
+  assert.strictEqual(T.TEMPLATES.length, 19); n++;
+  // thesis auto-fill wiring
+  const FIELDS = ['extMm', 'widthMm', 'osteoMm', 'mtfa', 'mldfa', 'mpta', 'mpts'];
+  const mapped = T.TEMPLATES.filter((t) => t.thesis).map((t) => t.thesis.field).sort();
+  assert.deepStrictEqual(mapped, FIELDS.slice().sort()); n++;
+  assert.deepStrictEqual(T.forView('thesis').map((t) => t.id), ['th-ext', 'th-width', 'mldfa', 'mpta', 'mtfa', 'tibial-slope', 'th-osteo']); n++;
+  const C = { calibration: { mmPerPx: 0.5 } };
+  const ext = G.evaluate(T.byId('th-ext'), [P(0, 0), P(100, 0), P(50, 10), P(58, 10)], C); near(ext.value, 4, 1e-9); n++;
+  const ext2 = G.evaluate(T.byId('th-ext'), [P(0, 0), P(100, 0), P(50, 10), P(46, 10)], C); near(ext2.value, -2, 1e-9); n++;   // inside the margin = negative
+  const ext3 = G.evaluate(T.byId('th-ext'), [P(100, 0), P(0, 0), P(50, 10), P(42, 10)], C); near(ext3.value, 4, 1e-9); n++;    // mirrored image, axis flips with it
+  assert.ok(G.evaluate(T.byId('th-ext'), [P(0, 0), P(100, 0), P(50, 10), P(58, 10)], {}).uncalibrated); n++;
+  near(G.evaluate(T.byId('th-width'), [P(0, 0), P(30, 40)], { calibration: { mmPerPx: 0.2 } }).value, 10, 1e-9); n++;
+  near(G.evaluate(T.byId('th-osteo'), [P(0, 0), P(6, 8)], { calibration: { mmPerPx: 0.5 } }).value, 5, 1e-9); n++;
+  const lim = (kx) => [P(90, 0), P(110, 20), P(90, 40), P(kx, 500), P(90, 1000), P(120, 1000)];
+  const mv = G.evaluate(T.byId('mtfa'), lim(105), {}), mr = G.evaluate(T.byId('mtfa'), lim(90), {});
+  assert.ok(mv.value > 0 && mv.value < 90 && mr.value > 0 && mr.value < 90 && mv.dev * mr.dev < 0); n += 2;                 // acute, never signed
+  near(G.evaluate(T.byId('mtfa'), lim(105), { side: 'L' }).value, mv.value, 1e-9); n++;
   T.VIEWS.forEach((v) => assert.ok(T.forView(v.id).length >= 1, 'view without measurements: ' + v.id)); n++;
 }
 

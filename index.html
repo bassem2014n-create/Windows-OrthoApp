@@ -3943,6 +3943,7 @@ A({ id:'oncology', name:'Musculoskeletal Oncology / Orthopedic Oncology', ops:[
     } else if (d.kind === 'move' && !d.isCur) {
       if (d.m.type === 'calib') return;
       queueSave(); renderList(); renderResult();
+      if (d.m.type === 'guided' && thesisFieldOf(d.m) && d.m.thesisSent != null) sendToThesis(d.m, 'refine');
     }
     draw(); renderHint();
   }
@@ -3973,6 +3974,7 @@ A({ id:'oncology', name:'Musculoskeletal Oncology / Orthopedic Oncology', ops:[
       S.rec.measurements = S.rec.measurements || []; S.rec.measurements.push(rec);
       S.showId = rec.id; S.guide.armed = false;
       queueSave(); renderList(); renderResult();
+      if (thesisFieldOf(rec)) sendToThesis(rec, 'new');
       return;
     }
     const n = (S.rec.measurements || []).filter(m => m.type === c.type).length + 1;
@@ -4220,6 +4222,35 @@ A({ id:'oncology', name:'Musculoskeletal Oncology / Orthopedic Oncology', ops:[
       tp ? h('p', { class: 'muted small' }, `${tp.name}: ${tp.points.length} points · result in ${tp.unit === 'degrees' ? 'degrees' : tp.unit === 'mm' ? 'millimetres' : 'ratio'}`) : null,
       sideRow, calRow));
   }
+  /* ---- Thesis auto-fill: a measurement whose template names a thesis field is offered to the patient's Thesis sheet ---- */
+  const thesisFieldOf = (m) => { const tp = m && m.type === 'guided' ? MT.byId(m.tpl) : null; return tp && tp.thesis ? tp.thesis.field : null; };
+  const thesisLabel = (k) => { const f = (window.Thesis && window.Thesis.FIELDS || []).find(x => x[0] === k); return f ? f[1] : k; };
+  const fmtThesis = (v) => v.toFixed(1);
+  /** mode 'new' = just measured (ask before replacing a different value); 'refine' = a placed point was dragged
+   *  (silently follow our own earlier value, otherwise ask). Returns true when the sheet now holds the value. */
+  async function sendToThesis(m, mode) {
+    const field = thesisFieldOf(m); if (!field || !S.patient || S.thesisBusy) return false;
+    const r = evalGuided(m, S.rec && S.rec.calibration);
+    if (!r || !r.ok || r.value == null || !isFinite(r.value)) return false;
+    const val = fmtThesis(r.value), label = thesisLabel(field);
+    S.thesisBusy = true;
+    try {
+      const cur = await OrthoDB.get('patients', S.patient.id); if (!cur) return false;
+      const th = Object.assign({}, cur.thesis || {}), old = th[field] == null ? '' : String(th[field]).trim();
+      if (old === val) { m.thesisSent = val; queueSave(); return true; }
+      const ours = mode === 'refine' && m.thesisSent != null && old === String(m.thesisSent);
+      if (old !== '' && !ours) {
+        const ok = await App.confirm({ title: 'Replace the Thesis value?', message: `The Thesis sheet already has ${label} = ${old}. Replace it with ${val}?`, okLabel: 'Replace', danger: false });
+        if (!ok) return false;
+      }
+      th[field] = val;
+      await OrthoDB.put('patients', Object.assign({}, cur, { thesis: th, updatedAt: Date.now() }));
+      S.patient.thesis = th; m.thesisSent = val; queueSave();
+      App.toast(`Saved to Thesis sheet: ${label} = ${val}`);
+      return true;
+    } catch (e) { App.toast('Could not save to the Thesis sheet', 'bad'); return false; }
+    finally { S.thesisBusy = false; renderResult(); }
+  }
   const STATUS = { low: 'Outside normal range', high: 'Outside normal range', normal: 'Within normal range' };
   function renderResult() {
     const box = $('#rad-result'); if (!box) return;
@@ -4240,6 +4271,9 @@ A({ id:'oncology', name:'Musculoskeletal Oncology / Orthopedic Oncology', ops:[
       r && r.ok && r.status ? h('div', { class: 'notice small ' + (r.status === 'normal' ? 'notice-ok' : 'notice-warn') }, STATUS[r.status] + (r.interpretation ? ' → ' + r.interpretation : '')) : null,
       r && r.ok && !r.status && r.interpretation ? h('div', { class: 'notice small' }, r.interpretation) : null,
       sideBtns,
+      thesisFieldOf(m) && r && r.ok ? h('div', { class: 'guide-row' },
+        h('span', { class: 'small' }, m.thesisSent != null ? `✓ In Thesis sheet: ${thesisLabel(thesisFieldOf(m))} = ${m.thesisSent}` : `Thesis field: ${thesisLabel(thesisFieldOf(m))}`),
+        h('button', { class: 'btn btn-sm', type: 'button', onclick: () => sendToThesis(m, 'new') }, m.thesisSent != null ? 'Send again' : 'Send to Thesis sheet')) : null,
       h('p', { class: 'muted small' }, 'Drag any placed point to refine — the result updates live. Reference ranges are typical adult values; interpret in clinical context.')));
   }
 
@@ -6510,7 +6544,7 @@ A({ id:'oncology', name:'Musculoskeletal Oncology / Orthopedic Oncology', ops:[
   'use strict';
   const { h, $, $$, fmtDate, round } = Util;
 
-  const APP_VERSION = '0.21.0';
+  const APP_VERSION = '0.22.0';
   const DISCLAIMER_VERSION = 1;   // bump to force re-acceptance after a wording change
 
   const App = window.App = { state: { currentPatientId: null, view: 'patients', tab: 'demo' } };
